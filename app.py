@@ -10,10 +10,48 @@ from llm.interface import LLMInterface
 from core.orchestrator import PaperReviewOrchestrator
 from core.ai_detector import AIDetector
 
+import sys
+import tkinter as tk
+from tkinter import filedialog
+
+def select_file(current_path=""):
+    """ 開啟檔案選擇視窗並返回路徑 """
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        # 嘗試從目前路徑所在資料夾開始瀏覽
+        initial_dir = os.path.dirname(current_path) if current_path and os.path.exists(os.path.dirname(current_path)) else os.getcwd()
+        file_path = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            title="選擇 GGUF 模型檔案",
+            filetypes=[("GGUF files", "*.gguf"), ("All files", "*.*")]
+        )
+        root.destroy()
+        return file_path
+    except Exception as e:
+        return None
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
 st.set_page_config(page_title="多代理人論文審查系統", page_icon="🎓", layout="wide")
 
 # ----------------- 初始化 -----------------
-config_path = "config.json"
+# 優先讀取執行檔同級目錄下的 config.json (讓使用者可以修改)
+# 如果不存在，才讀備份到打包內部的預設 config.json
+config_name = "config.json"
+if os.path.exists(config_name):
+    config_path = config_name
+else:
+    config_path = resource_path(config_name)
+
 if not os.path.exists(config_path):
     default_config = {
         "llm_mode": "mock",
@@ -85,11 +123,35 @@ if app_mode == "⚙️ 參數設定":
 
     with col_b:
         st.subheader("💻 本地 LLM 設定 (GGUF)")
-        app_config["local"]["model_path"] = st.text_input("模型檔案路徑", value=app_config["local"].get("model_path", ""))
+        
+        # 初始化 Session State 中的路徑
+        if "model_path_widget" not in st.session_state:
+            st.session_state.model_path_widget = app_config["local"].get("model_path", "")
+            
+        def on_browse_click():
+            """ 檔案選取按鈕的回呼函數 """
+            picked_path = select_file(st.session_state.model_path_widget)
+            if picked_path:
+                st.session_state.model_path_widget = picked_path
+
+        # 使用列佈局將輸入框與按鈕並排
+        path_col1, path_col2 = st.columns([0.85, 0.15])
+        with path_col1:
+            # 使用 key 與 session_state 連動
+            model_path_input = st.text_input("模型檔案路徑", key="model_path_widget")
+        with path_col2:
+            st.write(" ") # 垂直對齊用
+            st.write(" ")
+            # 使用 callback 方式更新狀態，避免 "cannot be modified after instantiated" 錯誤
+            st.button("📂", help="瀏覽檔案", on_click=on_browse_click)
+
+        # 更新回 app_config
+        app_config["local"]["model_path"] = model_path_input
         app_config["local"]["n_ctx"] = st.number_input("上下文窗口 (n_ctx)", value=app_config["local"].get("n_ctx", 4096), step=1024)
         app_config["local"]["max_tokens"] = st.number_input("單次最大輸出 (max_tokens)", value=app_config["local"].get("max_tokens", 1024), step=256)
 
     if st.button("💾 儲存並套用設定", type="primary"):
+        # 確保儲存前同步最新的輸入內容
         save_config(app_config)
         st.success("設定檔已成功更新！")
         st.rerun()
