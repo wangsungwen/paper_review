@@ -1,0 +1,16 @@
+{
+    "llm_mode": "local",
+    "cloud": {
+        "api_key": "YOUR_OPENAI_API_KEY_HERE",
+        "model_name": "gpt-4o"
+    },
+    "local": {
+        "model_path": "./local_models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf",
+        "n_ctx": 4096,
+        "max_tokens": 1024
+    },
+    "ai_detector": {
+        "api_key": "YOUR_GPTZERO_API_KEY_HERE",
+        "api_url": "https://api.gptzero.me/v2/predict/text"
+    }
+}

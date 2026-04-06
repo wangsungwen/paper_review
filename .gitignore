@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Project Specific
+local_models/
+.gemini/
+*.log
+.streamlit/
+
+# Config (containing sensitive keys)
+# config.json
