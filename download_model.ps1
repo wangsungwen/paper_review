@@ -1,8 +1,8 @@
 # download_model.ps1
 
 $model_dir = "local_models"
-$model_name = "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf"
-$url = "https://huggingface.co/lmstudio-community/Meta-Llama-3-8B-Instruct-GGUF/resolve/main/$model_name"
+$model_name = "Gemma-3-TAIDE-12b-Chat-Q4_K_M.gguf"
+$url = "https://huggingface.co/nctu6/Gemma-3-TAIDE-12b-Chat-GGUF/resolve/main/$model_name"
 
 # Fix Join-Path for older PowerShell versions
 $target_dir = Join-Path $PWD $model_dir
