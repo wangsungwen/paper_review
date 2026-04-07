@@ -12,9 +12,24 @@ try:
 except ImportError:
     HAS_LLAMA_CPP = False
 
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
 class LLMInterface:
     def __init__(self, config_path: str = "config.json"):
-        self.config = self._load_config(config_path)
+        # 優先查找工作目錄下的 config.json，再查找打包內的
+        if os.path.exists(config_path):
+            self.config_path = config_path
+        else:
+            self.config_path = resource_path(config_path)
+            
+        self.config = self._load_config(self.config_path)
         self.mode = self.config.get("llm_mode", "mock")
         self.local_llm = None
 
@@ -24,16 +39,24 @@ class LLMInterface:
                 self.mode = "mock"
             else:
                 model_path = self.config.get("local", {}).get("model_path", "")
-                if os.path.exists(model_path):
+                
+                # 路徑處理：優先查看 CWD，再查看 _internal 內部
+                if not os.path.exists(model_path):
+                    potential_path = resource_path(model_path)
+                    if os.path.exists(potential_path):
+                        model_path = potential_path
+                    else:
+                        print(f"錯誤：找不到本地模型檔案 {model_path} 或 {potential_path}，將降級為模擬模式。")
+                        self.mode = "mock"
+                        return
+
+                if self.mode != "mock":
                     n_ctx = self.config.get("local", {}).get("n_ctx", 4096)
                     try:
                         self.local_llm = Llama(model_path=model_path, n_ctx=n_ctx, verbose=False)
                     except Exception as e:
                         print(f"載入模型失敗：{e}")
                         self.mode = "mock"
-                else:
-                    print(f"錯誤：找不到本地模型檔案 {model_path}，將降級為模擬模式。")
-                    self.mode = "mock"
 
     def _load_config(self, path: str) -> dict:
         try:
@@ -83,14 +106,87 @@ class LLMInterface:
 
     async def _generate_cloud_async(self, system_prompt: str, user_prompt: str) -> str:
         cloud_config = self.config.get("cloud", {})
+        provider = cloud_config.get("provider", "openai")
         api_key = cloud_config.get("api_key", "")
         model_name = cloud_config.get("model_name", "gpt-4o")
+        
         if not api_key or "YOUR_CLOUD_API_KEY_HERE" in api_key:
-            return "錯誤：請先在 config.json 中填入有效的 OpenAI API Key。"
-        return await asyncio.to_thread(self._generate_cloud_sync, api_key, model_name, system_prompt, user_prompt)
+            return "錯誤：請先在 config.json 中填入有效的 API Key。"
+            
+        if provider == "gemini":
+            return await asyncio.to_thread(self._generate_gemini_sync, api_key, model_name, system_prompt, user_prompt)
+        else:
+            api_url = cloud_config.get("api_url", "https://api.openai.com/v1/chat/completions")
+            return await asyncio.to_thread(self._generate_cloud_sync, api_key, model_name, api_url, system_prompt, user_prompt)
 
-    def _generate_cloud_sync(self, api_key: str, model_name: str, system_prompt: str, user_prompt: str) -> str:
-        url = "https://api.openai.com/v1/chat/completions"
+    def _generate_gemini_sync(self, api_key: str, model_name: str, system_prompt: str, user_prompt: str) -> str:
+        # 確保參數沒有多餘空格
+        api_key = api_key.strip()
+        model_name = model_name.strip()
+        
+        # Google Gemini API (REST) - 使用 v1 版本並將系統提示詞併入使用者內容以確保最高相容性
+        url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={api_key}"
+        headers = {
+            "Content-Type": "application/json"
+        }
+        
+        # 建立組合提示詞
+        combined_prompt = f"系統指令：\n{system_prompt}\n\n請根據以上指令處理以下內容：\n{user_prompt}"
+        
+        payload = {
+            "contents": [
+                {
+                    "role": "user", 
+                    "parts": [{"text": combined_prompt}]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.7
+            }
+        }
+
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            if response.status_code != 200:
+                # 嘗試第二次機會：如果是 404，可能是 v1 不支援該模型，嘗試切換回 v1beta
+                if response.status_code == 404:
+                    url_beta = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                    response = requests.post(url_beta, headers=headers, json=payload, timeout=60)
+                    if response.status_code != 200:
+                        return f"【Gemini API 錯誤】：{response.status_code} - {response.text}"
+                else:
+                    return f"【Gemini API 錯誤】：{response.status_code} - {response.text}"
+            
+            data = response.json()
+            if 'candidates' not in data or not data['candidates']:
+                return f"【Gemini 沒給出回應】：{str(data)}"
+                
+            return data['candidates'][0]['content']['parts'][0]['text'].strip()
+        except Exception as e:
+            return f"【連線錯誤】：{str(e)}"
+    def list_models(self) -> str:
+        """ 嘗試列出該 API Key 可用的所有模型，用於除錯 """
+        cloud_config = self.config.get("cloud", {})
+        api_key = cloud_config.get("api_key", "").strip()
+        if not api_key:
+            return "錯誤：未設定 API Key。"
+            
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        try:
+            response = requests.get(url, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                models = [m.get("name", "").replace("models/", "") for m in data.get("models", [])]
+                # 過濾掉只支援嵌入或調整的模型，保留支援 generateContent 的
+                # 這裡簡單列出所有
+                return "、".join(models) if models else "找不到任何模型。"
+            else:
+                return f"無法取得模型清單 ({response.status_code}): {response.text}"
+        except Exception as e:
+            return f"連線失敗: {str(e)}"
+
+    def _generate_cloud_sync(self, api_key: str, model_name: str, api_url: str, system_prompt: str, user_prompt: str) -> str:
+        url = api_url
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}"
