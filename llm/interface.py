@@ -152,11 +152,12 @@ class LLMInterface:
             try:
                 response = requests.post(url, headers=headers, json=payload, timeout=60)
                 
-                # 處理 429 (Rate Limit) 錯誤
-                if response.status_code == 429:
+                # 處理 429 (Rate Limit) 或 503 (Service Unavailable / Overloaded) 錯誤
+                if response.status_code in [429, 503]:
                     import random
                     # 預設等待時間 (含退避和隨機抖動)
-                    wait_time = (2 ** attempt) * 5 + random.uniform(0, 1)  
+                    base_wait = (2 ** attempt) * 5 + random.uniform(0, 1)
+                    wait_time = base_wait
                     
                     # 嘗試從回應中取得建議的等待時間
                     try:
@@ -169,6 +170,9 @@ class LLMInterface:
                                 retry_delay_str = detail.get("retryDelay", "5s")
                                 # 處理如 "29.723877525s" 的字串
                                 wait_time = float(retry_delay_str.rstrip('s'))
+                                # 如果 API 建議的等待時間太短 (例如 0s)，則強制使用基本退避時間
+                                if wait_time < 2:
+                                    wait_time = base_wait
                                 break
                         
                         # 如果是 RESOURCE_EXHAUSTED 且 limit: 0，可能是每日配額已完
@@ -180,7 +184,8 @@ class LLMInterface:
                         pass
                     
                     if attempt < max_retries - 1:
-                        print(f"Gemini 速率限制中，等待 {wait_time:.2f} 秒後進行第 {attempt+2} 次重試...")
+                        status_name = "速率限制 (429)" if response.status_code == 429 else "伺服器忙碌 (503)"
+                        print(f"Gemini {status_name}，等待 {wait_time:.2f} 秒後進行第 {attempt+2} 次重試...")
                         time.sleep(wait_time)
                         continue
                 
