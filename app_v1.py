@@ -4,23 +4,15 @@ import streamlit as st
 import asyncio
 import json
 import os
-import sys
-import tkinter as tk
-from tkinter import filedialog
-from io import BytesIO
-
-# 新增解析套件
-import pypdf
-import docx
-
-# 匯入自定義模組
 from models.paper import Paper
 from models.reviewer import ReviewerAgent
 from llm.interface import LLMInterface
 from core.orchestrator import PaperReviewOrchestrator
 from core.ai_detector import AIDetector
 
-# ----------------- 工具函式 -----------------
+import sys
+import tkinter as tk
+from tkinter import filedialog
 
 def select_file(current_path=""):
     """ 開啟檔案選擇視窗並返回路徑 """
@@ -28,6 +20,7 @@ def select_file(current_path=""):
         root = tk.Tk()
         root.withdraw()
         root.attributes("-topmost", True)
+        # 嘗試從目前路徑所在資料夾開始瀏覽
         initial_dir = os.path.dirname(current_path) if current_path and os.path.exists(os.path.dirname(current_path)) else os.getcwd()
         file_path = filedialog.askopenfilename(
             initialdir=initial_dir,
@@ -36,43 +29,23 @@ def select_file(current_path=""):
         )
         root.destroy()
         return file_path
-    except Exception:
+    except Exception as e:
         return None
 
 def resource_path(relative_path):
-    """ 取得相對於執行路徑的絕對路徑 (支援 PyInstaller 打包環境) """
+    """ Get absolute path to resource, works for dev and for PyInstaller """
     try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
-def extract_text_from_file(uploaded_file):
-    """ 根據檔案副檔名提取文字內容 [新功能] """
-    file_extension = uploaded_file.name.split('.')[-1].lower()
-    
-    if file_extension == "txt":
-        return uploaded_file.getvalue().decode("utf-8")
-    
-    elif file_extension == "pdf":
-        pdf_reader = pypdf.PdfReader(BytesIO(uploaded_file.read()))
-        text = ""
-        for page in pdf_reader.pages:
-            content = page.extract_text()
-            if content:
-                text += content + "\n"
-        return text
-    
-    elif file_extension == "docx":
-        doc = docx.Document(BytesIO(uploaded_file.read()))
-        return "\n".join([para.text for para in doc.paragraphs])
-    
-    return ""
-
-# ----------------- 設定檔管理 -----------------
-
 st.set_page_config(page_title="多代理人論文審查系統", page_icon="🎓", layout="wide")
 
+# ----------------- 初始化 -----------------
+# 優先讀取執行檔同級目錄下的 config.json (讓使用者可以修改)
+# 如果不存在，才讀備份到打包內部的預設 config.json
 config_name = "config.json"
 if os.path.exists(config_name):
     config_path = config_name
@@ -82,7 +55,7 @@ else:
 if not os.path.exists(config_path):
     default_config = {
         "llm_mode": "mock",
-        "cloud": {"api_key": "", "model_name": "gpt-4o", "api_url": "https://api.openai.com/v1/chat/completions"},
+        "cloud": {"api_key": "", "model_name": "gpt-4o"},
         "local": {"model_path": "./local_models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf", "n_ctx": 4096, "max_tokens": 1024},
         "ai_detector": {"api_key": "", "api_url": "https://api.gptzero.me/v2/predict/text"}
     }
@@ -99,7 +72,6 @@ def save_config(config):
 
 app_config = load_config()
 
-# 初始化 Session State
 if "review_history" not in st.session_state:
     st.session_state.review_history = None
 
@@ -109,8 +81,7 @@ if "reviewers" not in st.session_state:
         ReviewerAgent("Prof. Lin", "嵌入式與邊緣運算", "微控制器整合", "務實，重視硬體資源消耗。")
     ]
 
-# ----------------- 側邊欄 -----------------
-
+# ----------------- 側邊欄：功能導覽與快速切換 -----------------
 with st.sidebar:
     st.header("🎮 功能選單")
     app_mode = st.radio("目前工作區", ["論文審查與分析", "⚙️ 參數設定"])
@@ -134,156 +105,91 @@ with st.sidebar:
         st.rerun()
 
 # ----------------- 分頁 1：參數設定 -----------------
-
 if app_mode == "⚙️ 參數設定":
     st.title("⚙️ 系統參數設定")
+    st.write("您可以在此修改模型、API Key 及偵測器的各項參數。")
     
     col_a, col_b = st.columns(2)
     
     with col_a:
-        st.subheader("☁️ 雲端 LLM 設定")
-        
-        # 核心提供者配置
-        provider_options = ["OpenAI-Compatible", "Gemini"]
-        current_provider = app_config["cloud"].get("provider", "openai")
-        provider_index = 1 if current_provider == "gemini" else 0
-        
-        selected_provider_type = st.radio("API 類型", provider_options, index=provider_index, horizontal=True)
-        app_config["cloud"]["provider"] = "gemini" if selected_provider_type == "Gemini" else "openai"
-
-        if selected_provider_type == "OpenAI-Compatible":
-            # 預設提供者清單 (OpenAI 格式)
-            openai_providers = {
-                "OpenAI": "https://api.openai.com/v1/chat/completions",
-                "DeepSeek": "https://api.deepseek.com/v1/chat/completions",
-                "Groq": "https://api.groq.com/openai/v1/chat/completions",
-                "OpenRouter": "https://openrouter.ai/api/v1/chat/completions",
-                "Custom": ""
-            }
-            
-            current_api_url = app_config["cloud"].get("api_url", "https://api.openai.com/v1/chat/completions")
-            
-            # 找出當前 URL 對應的提供者
-            provider_key = "Custom"
-            for k, v in openai_providers.items():
-                if v == current_api_url and k != "Custom":
-                    provider_key = k
-                    break
-            
-            selected_preset = st.selectbox("模型來源預設 (OpenAI 格式)", list(openai_providers.keys()), index=list(openai_providers.keys()).index(provider_key))
-            
-            if selected_preset != "Custom":
-                app_config["cloud"]["api_url"] = openai_providers[selected_preset]
-                current_api_url = openai_providers[selected_preset]
-
-            app_config["cloud"]["api_url"] = st.text_input("API 端點 (Endpoint)", value=current_api_url)
-            app_config["cloud"]["model_name"] = st.text_input("模型名稱 (Model Name)", value=app_config["cloud"].get("model_name", "gpt-4o"))
-        else:
-            # Gemini 專屬設定
-            st.info("Gemini 模式將使用 Google Generative AI REST API。")
-            
-            # --- 新增模型偵測功能 ---
-            if st.button("🔍 偵測此 API Key 可用的模型", help="如果出現 404 錯誤，請點擊此處查看您的帳號支援哪些模型名稱"):
-                llm_service = LLMInterface(config_path="config.json")
-                available_models = llm_service.list_models()
-                st.write(f"**可用模型清單：**\n{available_models}")
-            # -----------------------
-
-            # Gemini 常見模型清單
-            gemini_presets = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b", "gemini-2.0-flash-exp", "Custom"]
-            current_gemini_model = app_config["cloud"].get("model_name", "gemini-1.5-flash")
-            
-            # 找出目前模型是否在預設清單中
-            model_key = "Custom"
-            if current_gemini_model in gemini_presets:
-                model_key = current_gemini_model
-                
-            selected_gemini_preset = st.selectbox("選取 Gemini 模型", gemini_presets, index=gemini_presets.index(model_key))
-            
-            if selected_gemini_preset != "Custom":
-                app_config["cloud"]["model_name"] = selected_gemini_preset
-                current_gemini_model = selected_gemini_preset
-
-            app_config["cloud"]["model_name"] = st.text_input("模型名稱 (Model Name)", value=current_gemini_model)
-
-        app_config["cloud"]["api_key"] = st.text_input("API Key", value=app_config["cloud"].get("api_key", ""), type="password")
+        st.subheader("☁️ 雲端 LLM 設定 (OpenAI)")
+        app_config["cloud"]["api_key"] = st.text_input("OpenAI API Key", value=app_config["cloud"].get("api_key", ""), type="password")
+        app_config["cloud"]["model_name"] = st.text_input("模型名稱 (Model Name)", value=app_config["cloud"].get("model_name", "gpt-4o"))
         
         st.divider()
         st.subheader("🔍 AI Detector 設定")
         app_config["ai_detector"]["api_key"] = st.text_input("GPTZero API Key", value=app_config["ai_detector"].get("api_key", ""), type="password")
-        app_config["ai_detector"]["api_url"] = st.text_input("API 端點", value=app_config["ai_detector"].get("api_url", "https://api.gptzero.me/v2/predict/text"))
+        app_config["ai_detector"]["api_url"] = st.text_input("API 端點 (Endpoint)", value=app_config["ai_detector"].get("api_url", "https://api.gptzero.me/v2/predict/text"))
 
     with col_b:
         st.subheader("💻 本地 LLM 設定 (GGUF)")
         
+        # 初始化 Session State 中的路徑
         if "model_path_widget" not in st.session_state:
             st.session_state.model_path_widget = app_config["local"].get("model_path", "")
             
         def on_browse_click():
+            """ 檔案選取按鈕的回呼函數 """
             picked_path = select_file(st.session_state.model_path_widget)
             if picked_path:
                 st.session_state.model_path_widget = picked_path
 
+        # 使用列佈局將輸入框與按鈕並排
         path_col1, path_col2 = st.columns([0.85, 0.15])
         with path_col1:
+            # 使用 key 與 session_state 連動
             model_path_input = st.text_input("模型檔案路徑", key="model_path_widget")
         with path_col2:
+            st.write(" ") # 垂直對齊用
             st.write(" ")
-            st.write(" ")
+            # 使用 callback 方式更新狀態，避免 "cannot be modified after instantiated" 錯誤
             st.button("📂", help="瀏覽檔案", on_click=on_browse_click)
 
+        # 更新回 app_config
         app_config["local"]["model_path"] = model_path_input
         app_config["local"]["n_ctx"] = st.number_input("上下文窗口 (n_ctx)", value=app_config["local"].get("n_ctx", 4096), step=1024)
-        app_config["local"]["max_tokens"] = st.number_input("最大輸出 (max_tokens)", value=app_config["local"].get("max_tokens", 1024), step=256)
+        app_config["local"]["max_tokens"] = st.number_input("單次最大輸出 (max_tokens)", value=app_config["local"].get("max_tokens", 1024), step=256)
 
     if st.button("💾 儲存並套用設定", type="primary"):
+        # 確保儲存前同步最新的輸入內容
         save_config(app_config)
         st.success("設定檔已成功更新！")
         st.rerun()
 
 # ----------------- 分頁 2：主頁面 -----------------
-
 else:
     st.title("🎓 多代理人 AI 論文審查系統")
 
-    # 1. 論文資料設定
+    # 區塊 1：論文資料填寫與上傳
     st.header("📄 1. 論文資料設定")
     col1, col2 = st.columns(2)
     with col1:
         paper_title = st.text_input("論文標題", placeholder="請輸入論文標題...")
     with col2:
-        paper_field = st.text_input("主題領域", placeholder="例如：電腦視覺、人工智慧")
+        paper_field = st.text_input("主題領域", placeholder="例如：電腦視覺、邊緣運算")
 
     paper_content = ""
-    # 更新支援格式：txt, pdf, docx
-    uploaded_file = st.file_uploader("上傳論文檔案 (.txt, .pdf, .docx)", type=["txt", "pdf", "docx"])
-    
+    uploaded_file = st.file_uploader("上傳論文檔案 (.txt)", type=["txt"])
     if uploaded_file is not None:
-        with st.spinner("正在解析檔案內容..."):
-            try:
-                paper_content = extract_text_from_file(uploaded_file)
-                if paper_content.strip():
-                    st.success(f"檔案「{uploaded_file.name}」解析成功！")
-                else:
-                    st.warning("檔案解析完成，但未偵測到有效文字。")
-            except Exception as e:
-                st.error(f"解析失敗：{e}")
+        paper_content = uploaded_file.getvalue().decode("utf-8")
     
-    paper_content_input = st.text_area("或直接貼上/編輯論文內容", value=paper_content, height=200)
-    final_paper_content = paper_content_input
+    paper_content_input = st.text_area("或直接貼上論文內容", height=150)
+    final_paper_content = paper_content if paper_content else paper_content_input
 
-    # 2. AI 寫作偵測
+    # 區塊 2：AI 寫作偵測
     st.header("🔍 2. AI 寫作偵測")
     if st.button("執行 AI 寫作分析", icon="🔎"):
         if not final_paper_content.strip():
             st.warning("請先輸入或上傳論文內容！")
         else:
             detector = AIDetector()
-            with st.spinner("分析中..."):
+            with st.spinner("正在進行 AI 風格分析..."):
                 report = detector.analyze(final_paper_content)
-                st.subheader(f"📊 偵測報告 (AI 比例：{report['ai_ratio']}%)")
+                st.session_state.detector_report = report
                 
-                # 渲染顏色標示
+                st.subheader("📊 偵測報告")
+                st.write(f"**AI 生成比例：{report['ai_ratio']}%**")
+                
                 highlighted_html = "<div style='line-height:1.8; border:1px solid #ddd; padding:20px; border-radius:10px; background-color:#fafafa; color:#333; font-size:16px;'>"
                 for seg in report['segments']:
                     if seg['type'] == 'AI':
@@ -293,7 +199,7 @@ else:
                 highlighted_html += "</div>"
                 st.markdown(highlighted_html, unsafe_allow_html=True)
 
-    # 3. 審查委員配置
+    # 區塊 3：審查委員配置
     st.header("👥 3. 審查委員配置")
     with st.expander("➕ 管理審查委員", expanded=False):
         for i, reviewer in enumerate(st.session_state.reviewers):
@@ -308,7 +214,7 @@ else:
                 st.session_state.reviewers.append(ReviewerAgent(r_name, r_expertise, r_focus, r_style))
                 st.rerun()
 
-    # 4. 執行多代理人審查
+    # 區塊 4：多代理人審查
     st.header("🚀 4. 執行多代理人學術審查")
 
     async def run_review_process():
@@ -321,45 +227,51 @@ else:
         orchestrator = PaperReviewOrchestrator(paper=my_paper, reviewers=st.session_state.reviewers, llm=llm_service)
 
         st.divider()
-        st.subheader(f"審查進行中：{paper_title}")
+        st.subheader(f"審查進度：{paper_title}")
         
         with st.status("第一輪：獨立深度審查...", expanded=True) as s1:
-            await orchestrator.run_round_1()
-            s1.update(label="✅ 第一輪完成", state="complete")
+            r1 = await orchestrator.run_round_1()
+            s1.update(label="✅ 第一輪：獨立深度審查完成", state="complete")
         
         with st.status("第二輪：交叉辯論...", expanded=True) as s2:
-            await orchestrator.run_round_2()
-            s2.update(label="✅ 第二輪完成", state="complete")
+            r2 = await orchestrator.run_round_2()
+            s2.update(label="✅ 第二輪：交叉辯論完成", state="complete")
             
         with st.status("第三輪：最終裁決...", expanded=True) as s3:
-            await orchestrator.run_round_3()
-            s3.update(label="✅ 第三輪完成", state="complete")
+            r3 = await orchestrator.run_round_3()
+            s3.update(label="✅ 第三輪：最終裁決完成", state="complete")
         
         st.session_state.review_history = orchestrator.history
+        st.success("🎉 多輪審查已全數完成！請見下方結果或點擊匯出。")
         st.rerun()
 
     if st.button("啟動多輪 AI 審查", type="primary"):
         asyncio.run(run_review_process())
 
-    # 結果展示與匯出
+    # 審查結果展示與匯出
     if st.session_state.review_history:
         st.divider()
-        st.header("📋 審查結果展示")
+        st.header("📋 審查意見彙整與匯出")
         
+        # 準備匯出內容
         export_text = f"# 論文審查報告：{paper_title}\n領域：{paper_field}\n\n"
         for rnd in ["round_1", "round_2", "round_3"]:
-            title = "第一輪：獨立審查" if rnd=="round_1" else "第二輪：交叉辯論" if rnd=="round_2" else "第三輪：最終裁決"
-            export_text += f"## {title}\n"
+            export_text += f"## {'第一輪：獨立審查' if rnd=='round_1' else '第二輪：交叉辯論' if rnd=='round_2' else '第三輪：最終裁決'}\n"
             for name, content in st.session_state.review_history[rnd].items():
                 export_text += f"### {name}\n{content}\n\n"
         
-        st.download_button(
-            label="📥 下載完整 Markdown 報告",
-            data=export_text,
-            file_name=f"Review_Report_{paper_title}.md",
-            mime="text/markdown"
-        )
+        col_exp1, col_exp2 = st.columns([3, 1])
+        with col_exp1:
+            st.info("審查已完成，您可以查看下方詳情或下載完整 Markdown 格式報告。")
+        with col_exp2:
+            st.download_button(
+                label="📥 匯出完整報告 (.md)",
+                data=export_text,
+                file_name=f"Review_Report_{paper_title.replace(' ', '_')}.md",
+                mime="text/markdown"
+            )
 
+        # 展開展示
         for rnd_id, rnd_name in [("round_1", "第一輪意見"), ("round_2", "第二輪辯論"), ("round_3", "最終裁決")]:
             with st.expander(rnd_name, expanded=(rnd_id == "round_3")):
                 for name, content in st.session_state.review_history[rnd_id].items():

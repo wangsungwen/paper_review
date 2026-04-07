@@ -1,28 +1,47 @@
-# 多代理人論文審查系統 - 使用說明 (v2.0)
+# 多代理人論文審查系統 - 使用說明 (v3.0)
 
-本資料夾包含了已打包的論文審查系統執行檔，現已支援 **Gemma-3** 與 **Llama-3** 雙模型選取。
+本系統是一個基於 Streamlit 的多代理人 AI 論文審查平台，支援本地 Llama-cpp (GGUF) 模型以及多種雲端 LLM 服務。透過多個 AI 審查委員的獨立審查、交叉辯論與最終裁決，為您的論文提供全方位的學術反饋。
 
-## 如何執行
+## 🚀 核心新功能：雲端 LLM 支援
 
-1. 直接點擊 **`PaperReviewSystem.exe`** 即可啟動。
-2. 啟動後會自動在您的預設瀏覽器中開啟 Streamlit 介面。
+現已全面支援雲端 API，讓您在沒有高效能顯示卡的環境下也能流暢進行審查：
 
-## 新版功能亮點
+- **OpenAI 格式支援**：可對接 OpenAI (GPT-4o)、DeepSeek、Groq、OpenRouter 等所有相容 OpenAI 協定的 API。
+- **Google Gemini 整合**：原生支援 Google Gemini API (如 `gemini-1.5-flash`, `gemini-1.5-pro`, `gemini-2.0-flash-exp`)。
+- **Gemini 模型偵測**：新增「🔍 偵測可用模型」功能，可自動查詢您的 API Key 權限下所有可用的 Gemini 模型名稱，解決 404 找不到模型的問題。
 
-- **雙模型預載**: 內建 Gemma-3 (7.5GB) 與 Llama-3 (4.9GB)。
-- **模型選取器**: 在「⚙️ 參數設定」頁面中，點擊路徑旁的 **📂** 按鈕即可瀏覽並切換本地模型檔案。
-- **自動記憶**: 選取完模型路徑並點擊「💾 儲存並套用設定」後，下次啟動將自動載入該模型。
+## ⚙️ 如何配置雲端模型
 
-## 檔案結構
+1. 啟動程式後，點擊側邊欄的 **⚙️ 參數設定**。
+2. 在 **☁️ 雲端 LLM 設定** 區域中：
+   - **API 類型**：選擇 `OpenAI-Compatible` 或 `Gemini`。
+   - **模型來源預設**：若為 OpenAI 類型，可從下拉選單快速填入常見服務商 (如 DeepSeek) 的端點。
+   - **API Key**：填入您的金鑰。
+   - **模型名稱**：填入欲使用的模型識別碼 (如 `gpt-4o` 或 `gemini-1.5-flash`)。
+3. 點擊 **💾 儲存並套用設定**。
+4. 在側邊欄的 **🤖 LLM 快速切換** 中選擇 **☁️ 雲端 API** 即可開始使用。
 
-- `PaperReviewSystem.exe`: 程式啟動檔。
-- `config.json`: 系統設定檔。
-- `_internal/`: 程式內部依賴資源。
-- `_internal/local_models/`: 模型存放資料夾。
-  - `Gemma-3-TAIDE-12b-Chat-Q4_K_M.gguf` (預設)
-  - `Meta-Llama-3-8B-Instruct-Q4_K_M.gguf`
+## 💻 本地模型說明 (GGUF)
 
-## 注意事項
+系統依然保留強大的本地隱私推論能力：
 
-- **硬體需求**: Gemma-3 需要較高的算力與顯存，若推論較慢屬正常現象。
-- **自定義模型**: 您可以將自己的 `.gguf` 模型放入 `_internal/local_models`，再透過介面的 **📂** 按鈕選取路徑。
+- **內建模型**：支援 Gemma-3 與 Llama-3 等 GGUF 格式模型。
+- **自定義路徑**：您可點擊路徑旁的 **📂** 按鈕選取您硬碟中任何 `.gguf` 檔案。
+- **上下文設定**：可自由調整 `n_ctx` (上下文窗口) 與 `max_tokens` (輸出上限)。
+
+## 📁 檔案結構說明
+
+- `PaperReviewSystem.exe`: 程式主執行檔。
+- `config.json`: 儲存所有 API 金鑰、模型路徑與參數設定。
+- `llm/interface.py`: 多供應商 LLM 調度核心。
+- `app.py`: Streamlit 使用者介面。
+- `_internal/local_models/`: 預設本地模型存放區。
+
+## ⚠️ 注意事項
+
+- **雲端 API 限制**：雲端模式需要穩定的網路連線，且需注意您的 API Token 消耗與 Rate Limit (TPM/RPM)。
+- **Gemini 錯誤排除**：若使用 Gemini 出現 404 錯誤，請務必點擊「偵測可用模型」按鈕確認該 API Key 在您的區域支援的確切模型名稱。
+- **隱私聲明**：本地模式 (`local`) 完全在您的電腦執行，論文內容不會外流；雲端模式 (`cloud`) 則會將內容傳送至對應的服務供應商 (如 OpenAI/Google)。
+
+---
+*本系統持續更新中，如有任何問題請參考各家 API 供應商之官方文檔。*

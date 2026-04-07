@@ -1,11 +1,13 @@
 {
-    "llm_mode": "local",
+    "llm_mode": "cloud",
     "cloud": {
-        "api_key": "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",
-        "model_name": "gpt-4o"
+        "provider": "gemini",
+        "api_key": "AIzaSyD3s_OYi-kc-9uNPvlMhRbtk7HyV60fDQk",
+        "model_name": "gemini-2.5-flash",
+        "api_url": "https://api.openai.com/v1/chat/completions"
     },
     "local": {
-        "model_path": "C:/Users/wangs/paper_review_system/local_models/Gemma-3-TAIDE-12b-Chat-Q4_K_M.gguf",
+        "model_path": "D:/ResearchCodes/paper_review_system/local_models/Gemma-3-TAIDE-12b-Chat-Q4_K_M.gguf",
         "n_ctx": 4096,
         "max_tokens": 1024
     },
