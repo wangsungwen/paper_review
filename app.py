@@ -8,6 +8,7 @@ import sys
 # 新增解析套件
 import pypdf
 import docx
+from io import BytesIO
 
 # ----------------- 處理 Tkinter (雲端環境不支援) -----------------
 try:
