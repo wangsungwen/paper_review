@@ -147,26 +147,40 @@ class LLMInterface:
 
         import time
 
-        max_retries = 3
+        max_retries = 5
         for attempt in range(max_retries):
             try:
                 response = requests.post(url, headers=headers, json=payload, timeout=60)
                 
                 # 處理 429 (Rate Limit) 錯誤
                 if response.status_code == 429:
-                    wait_time = (attempt + 1) * 5  # 預設等待時間
+                    import random
+                    # 預設等待時間 (含退避和隨機抖動)
+                    wait_time = (2 ** attempt) * 5 + random.uniform(0, 1)  
+                    
                     # 嘗試從回應中取得建議的等待時間
                     try:
-                        retry_info = response.json().get("details", [])
+                        response_data = response.json()
+                        error_data = response_data.get("error", {})
+                        retry_info = error_data.get("details", [])
+                        
                         for detail in retry_info:
                             if detail.get("@type") == "type.googleapis.com/google.rpc.RetryInfo":
-                                wait_time = float(detail.get("retryDelay", "5s").replace("s", ""))
+                                retry_delay_str = detail.get("retryDelay", "5s")
+                                # 處理如 "29.723877525s" 的字串
+                                wait_time = float(retry_delay_str.rstrip('s'))
                                 break
+                        
+                        # 如果是 RESOURCE_EXHAUSTED 且 limit: 0，可能是每日配額已完
+                        if error_data.get("status") == "RESOURCE_EXHAUSTED":
+                            error_msg = error_data.get("message", "")
+                            if "limit: 0" in error_msg:
+                                return f"【Gemini 額度耗盡】：您的每日 API 配額已用完。請更換 API Key 或明日再試。\n詳細訊息：{error_msg}"
                     except:
                         pass
                     
                     if attempt < max_retries - 1:
-                        print(f"Gemini 速率限制中，等待 {wait_time} 秒後重試...")
+                        print(f"Gemini 速率限制中，等待 {wait_time:.2f} 秒後進行第 {attempt+2} 次重試...")
                         time.sleep(wait_time)
                         continue
                 
