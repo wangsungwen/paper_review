@@ -5,13 +5,18 @@ import asyncio
 import json
 import os
 import sys
-import tkinter as tk
-from tkinter import filedialog
-from io import BytesIO
-
 # 新增解析套件
 import pypdf
 import docx
+
+# ----------------- 處理 Tkinter (雲端環境不支援) -----------------
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+    TK_AVAILABLE = True
+except (ImportError, Exception):
+    TK_AVAILABLE = False
+# -----------------------------------------------------------
 
 # 匯入自定義模組
 from models.paper import Paper
@@ -24,6 +29,8 @@ from core.ai_detector import AIDetector
 
 def select_file(current_path=""):
     """ 開啟檔案選擇視窗並返回路徑 """
+    if not TK_AVAILABLE:
+        return None
     try:
         root = tk.Tk()
         root.withdraw()
@@ -230,7 +237,10 @@ if app_mode == "⚙️ 參數設定":
         with path_col2:
             st.write(" ")
             st.write(" ")
-            st.button("📂", help="瀏覽檔案", on_click=on_browse_click)
+            if TK_AVAILABLE:
+                st.button("📂", help="瀏覽本地模型檔案", on_click=on_browse_click)
+            else:
+                st.button("📂", help="雲端環境不支援瀏覽本地檔案", disabled=True)
 
         app_config["local"]["model_path"] = model_path_input
         app_config["local"]["n_ctx"] = st.number_input("上下文窗口 (n_ctx)", value=app_config["local"].get("n_ctx", 4096), step=1024)
