@@ -190,12 +190,7 @@ if app_mode == "⚙️ 參數設定":
             # Gemini 專屬設定
             st.info("Gemini 模式將使用 Google Generative AI REST API。")
             
-            # --- 新增模型偵測功能 ---
-            if st.button("🔍 偵測此 API Key 可用的模型", help="如果出現 404 錯誤，請點擊此處查看您的帳號支援哪些模型名稱"):
-                llm_service = LLMInterface(config_path="config.json")
-                available_models = llm_service.list_models()
-                st.write(f"**可用模型清單：**\n{available_models}")
-            # -----------------------
+            # (原偵測按鈕已移至 API Key 下方)
 
             # Gemini 常見模型清單
             gemini_presets = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b", "gemini-2.0-flash-exp", "Custom"]
@@ -214,7 +209,20 @@ if app_mode == "⚙️ 參數設定":
 
             app_config["cloud"]["model_name"] = st.text_input("模型名稱 (Model Name)", value=current_gemini_model)
 
+        # API Key 輸入
         app_config["cloud"]["api_key"] = st.text_input("API Key", value=app_config["cloud"].get("api_key", ""), type="password")
+
+        # --- Gemini 專屬：模型偵測按鈕 (放置在此以支援即時測試新 Key) ---
+        if selected_provider_type == "Gemini":
+            if st.button("🔍 偵測目前填入 API Key 可用的模型"):
+                if app_config["cloud"]["api_key"] == "YOUR_NEW_GEMINI_API_KEY" or not app_config["cloud"]["api_key"]:
+                    st.error("請先填入您從 Google AI Studio 取得的新 API Key！")
+                else:
+                    llm_service = LLMInterface(config_path="config.json")
+                    # 使用目前畫面上填寫的 API Key 進行偵測，不需先儲存
+                    available_models = llm_service.list_models(api_key=app_config["cloud"]["api_key"])
+                    st.write(f"**可用模型清單：**\n{available_models}")
+        # ---------------------------------------------------------
         
         st.divider()
         st.subheader("🔍 AI Detector 設定")
