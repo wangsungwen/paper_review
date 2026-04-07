@@ -145,31 +145,62 @@ class LLMInterface:
             }
         }
 
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-            if response.status_code != 200:
-                # 嘗試第二次機會：如果是 404，可能是 v1 不支援該模型，嘗試切換回 v1beta
-                if response.status_code == 404:
-                    url_beta = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-                    response = requests.post(url_beta, headers=headers, json=payload, timeout=60)
-                    if response.status_code != 200:
-                        return f"【Gemini API 錯誤】：{response.status_code} - {response.text}"
-                else:
-                    return f"【Gemini API 錯誤】：{response.status_code} - {response.text}"
-            
-            data = response.json()
-            if 'candidates' not in data or not data['candidates']:
-                return f"【Gemini 沒給出回應】：{str(data)}"
+        import time
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=60)
                 
-            return data['candidates'][0]['content']['parts'][0]['text'].strip()
-        except Exception as e:
-            return f"【連線錯誤】：{str(e)}"
-    def list_models(self) -> str:
+                # 處理 429 (Rate Limit) 錯誤
+                if response.status_code == 429:
+                    wait_time = (attempt + 1) * 5  # 預設等待時間
+                    # 嘗試從回應中取得建議的等待時間
+                    try:
+                        retry_info = response.json().get("details", [])
+                        for detail in retry_info:
+                            if detail.get("@type") == "type.googleapis.com/google.rpc.RetryInfo":
+                                wait_time = float(detail.get("retryDelay", "5s").replace("s", ""))
+                                break
+                    except:
+                        pass
+                    
+                    if attempt < max_retries - 1:
+                        print(f"Gemini 速率限制中，等待 {wait_time} 秒後重試...")
+                        time.sleep(wait_time)
+                        continue
+                
+                if response.status_code != 200:
+                    # 嘗試第二次機會：如果是 404，可能是 v1 不支援該模型，嘗試切換回 v1beta
+                    if response.status_code == 404:
+                        url_beta = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                        response = requests.post(url_beta, headers=headers, json=payload, timeout=60)
+                        if response.status_code != 200:
+                            return f"【Gemini API 錯誤】：{response.status_code} - {response.text}"
+                    else:
+                        return f"【Gemini API 錯誤】：{response.status_code} - {response.text}"
+                
+                data = response.json()
+                if 'candidates' not in data or not data['candidates']:
+                    return f"【Gemini 沒給出回應】：{str(data)}"
+                    
+                return data['candidates'][0]['content']['parts'][0]['text'].strip()
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return f"【連線錯誤】：{str(e)}"
+        
+        return "【Gemini 錯誤】：已達最大重試次數，仍受速率限制。"
+    def list_models(self, api_key: str = None) -> str:
         """ 嘗試列出該 API Key 可用的所有模型，用於除錯 """
-        cloud_config = self.config.get("cloud", {})
-        api_key = cloud_config.get("api_key", "").strip()
         if not api_key:
-            return "錯誤：未設定 API Key。"
+            cloud_config = self.config.get("cloud", {})
+            api_key = cloud_config.get("api_key", "").strip()
+            
+        if not api_key or api_key == "YOUR_NEW_GEMINI_API_KEY":
+            return "錯誤：未設定有效 API Key。"
             
         url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
         try:
