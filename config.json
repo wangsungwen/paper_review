@@ -1,11 +1,11 @@
 {
     "llm_mode": "local",
     "cloud": {
-        "api_key": "YOUR_OPENAI_API_KEY_HERE",
+        "api_key": "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",
         "model_name": "gpt-4o"
     },
     "local": {
-        "model_path": "./local_models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf",
+        "model_path": "C:/Users/wangs/paper_review_system/local_models/Gemma-3-TAIDE-12b-Chat-Q4_K_M.gguf",
         "n_ctx": 4096,
         "max_tokens": 1024
     },

@@ -5,6 +5,7 @@ import streamlit
 import llama_cpp
 import diskcache
 import tkinter
+import pypdf
 import shutil
 
 # 取得必要套件的絕對路徑，以便 PyInstaller 正確打包
@@ -12,6 +13,7 @@ streamlit_pkg_path = os.path.dirname(streamlit.__file__)
 llama_cpp_pkg_path = os.path.dirname(llama_cpp.__file__)
 diskcache_pkg_path = os.path.dirname(diskcache.__file__)
 tkinter_pkg_path = os.path.dirname(tkinter.__file__)
+pypdf_pkg_path = os.path.dirname(pypdf.__file__)
 
 from PyInstaller.utils.hooks import copy_metadata
 
@@ -28,6 +30,7 @@ datas = [
     (llama_cpp_pkg_path, "llama_cpp"),
     (diskcache_pkg_path, "diskcache"),
     (tkinter_pkg_path, "tkinter"),
+    (pypdf_pkg_path, "pypdf"),
     ("app.py", "."),
     ("config.json", "."),
     ("core", "core"),
@@ -56,6 +59,9 @@ PyInstaller.__main__.run([
     '--hidden-import=diskcache',
     '--hidden-import=tkinter',
     '--hidden-import=_tkinter',
+    '--hidden-import=pypdf',
+    '--hidden-import=docx',
+    '--hidden-import=lxml',
     '--clean',
     '--noconfirm',
 ])
