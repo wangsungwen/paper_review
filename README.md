@@ -12,7 +12,7 @@
 
 ## ⚙️ 如何配置雲端模型
 
-1. 指令行輸入 streamlit run app.py 啟動程式後，點擊側邊欄的 **⚙️ 參數設定**。
+1. 啟動程式後，點擊側邊欄的 **⚙️ 參數設定**。
 2. 在 **☁️ 雲端 LLM 設定** 區域中：
    - **API 類型**：選擇 `OpenAI-Compatible` 或 `Gemini`。
    - **模型來源預設**：若為 OpenAI 類型，可從下拉選單快速填入常見服務商 (如 DeepSeek) 的端點。
@@ -20,6 +20,17 @@
    - **模型名稱**：填入欲使用的模型識別碼 (如 `gpt-4o` 或 `gemini-1.5-flash`)。
 3. 點擊 **💾 儲存並套用設定**。
 4. 在側邊欄的 **🤖 LLM 快速切換** 中選擇 **☁️ 雲端 API** 即可開始使用。
+
+## 📦 本地模型下載與安裝 (Model Installation)
+
+由於本地模型檔案較大，請自行從以下連結下載並放入 `local_models/` 資料夾：
+
+- **Gemma-3-TAIDE-12b (Q4_K_M)**: [下載連結](https://huggingface.co/taide/Gemma-3-TAIDE-12b-Chat-GGUF)
+- **Meta-Llama-3-8B (Q4_K_M)**: [下載連結](https://huggingface.co/lmstudio-community/Meta-Llama-3-8B-Instruct-GGUF)
+
+下載後，請依照以下路徑存放：
+`local_models/Gemma-3-TAIDE-12b-Chat-Q4_K_M.gguf`
+`local_models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf`
 
 ## 💻 本地模型說明 (GGUF)
 
