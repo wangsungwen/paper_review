@@ -76,32 +76,33 @@ class LLMInterface:
     def _generate_local_sync(self, system_prompt: str, user_prompt: str) -> str:
         if not self.local_llm:
             return "錯誤：本地模型尚未載入。"
+        
         local_config = self.config.get("local", {})
-        context_window = local_config.get("n_ctx", 4096)
-        max_tokens = local_config.get("max_tokens", 1024)
-        full_system = f"System: {system_prompt}"
-        full_user = f"User: {user_prompt}"
-        estimated_sys_tokens = len(full_system) // 2
-        estimated_user_tokens = len(full_user) // 2
-        if (estimated_sys_tokens + estimated_user_tokens + max_tokens) > context_window:
-            allowed_user_chars = (context_window - max_tokens - estimated_sys_tokens - 100) * 2
-            if allowed_user_chars > 0 and len(user_prompt) > allowed_user_chars:
-                user_prompt = user_prompt[:allowed_user_chars] + "\n...(此處因長度限制而截斷)..."
-        prompt = f"System: {system_prompt}\nUser: {user_prompt}\nAssistant:"
+        max_tokens = local_config.get("max_tokens", 2048)
+        
         try:
-            response = self.local_llm(
-                prompt,
+            response = self.local_llm.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                response_format={"type": "json_object"},
                 max_tokens=max_tokens,
-                temperature=0.7,
+                temperature=0.2,
                 top_p=0.9,
-                stop=["User:", "System:", "<|eot_id|>"],
-                echo=False
+                stop=["<|eot_id|>", "<|end_of_text|>", "User:", "System:"]
             )
-            return response['choices'][0]['text'].strip()
+            
+            result = response['choices'][0]['message']['content'].strip()
+            if not result:
+                print("DEBUG - Model returned empty string via chat API.")
+            return result
+            
         except Exception as e:
             error_msg = str(e)
-            if "context window" in error_msg.lower() or "decode" in error_msg.lower():
-                return f"【模型限制】論文內容過長，超過處理上限。"
+            print(f"DEBUG - Inference error: {error_msg}")
+            if "context window" in error_msg.lower():
+                return "【模型限制】內容過長，超過 Context Window。"
             return f"【推論錯誤】：{error_msg}"
 
     async def _generate_cloud_async(self, system_prompt: str, user_prompt: str) -> str:
@@ -120,9 +121,11 @@ class LLMInterface:
             return await asyncio.to_thread(self._generate_cloud_sync, api_key, model_name, api_url, system_prompt, user_prompt)
 
     def _generate_gemini_sync(self, api_key: str, model_name: str, system_prompt: str, user_prompt: str) -> str:
-        # 確保參數沒有多餘空格
+        # 確保參數沒有多餘空格，且統一不含 "models/" 前綴
         api_key = api_key.strip()
         model_name = model_name.strip()
+        if model_name.startswith("models/"):
+            model_name = model_name.replace("models/", "", 1)
         
         # Google Gemini API (REST) - 使用 v1 版本並將系統提示詞併入使用者內容以確保最高相容性
         url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={api_key}"
@@ -195,7 +198,7 @@ class LLMInterface:
                         url_beta = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
                         response = requests.post(url_beta, headers=headers, json=payload, timeout=60)
                         if response.status_code != 200:
-                            return f"【Gemini API 錯誤】：{response.status_code} - {response.text}"
+                            return f"【Gemini API 錯誤】：找不到模型或 API 版本不支援。請確認模型名稱 '{model_name}' 是否正確。({response.status_code})"
                     else:
                         return f"【Gemini API 錯誤】：{response.status_code} - {response.text}"
                 
