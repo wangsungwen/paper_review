@@ -15,6 +15,11 @@ from transformers import AutoTokenizer, AutoConfig, AutoModel, PreTrainedModel
 # ==========================================
 class DesklibAIDetectionModel(PreTrainedModel):
     config_class = AutoConfig
+    
+    # 修正 transformers 新版本 AttributeError ('all_tied_weights_keys') 問題
+    @property
+    def all_tied_weights_keys(self):
+        return {}
 
     def __init__(self, config):
         super().__init__(config)
@@ -47,40 +52,37 @@ class DesklibAIDetectionModel(PreTrainedModel):
             output["loss"] = loss
         return output
 
+import streamlit as st
+
+@st.cache_resource(show_spinner="正在載入神經網路鑑識模型... (這只需執行一次)")
+def get_hf_detector_model():
+    print("[System] 正在載入 Desklib AI 偵測神經網路模型...")
+    model_directory = "desklib/ai-text-detector-v1.01"
+    # 若模型不存在，請確保預先被下載放入該資料夾
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tokenizer = AutoTokenizer.from_pretrained(model_directory)
+    hf_model = DesklibAIDetectionModel.from_pretrained(model_directory).to(device)
+    hf_model.eval() # 設置為評估模式
+    print(f"[System] 模型載入完成！使用運算裝置: {device}")
+    return tokenizer, hf_model, device
+
 # ==========================================
 # 主要偵測器類別
 # ==========================================
 class AIDetector:
-    def __init__(self, config_path: str = "config.json"):
-        self.config = self._load_config(config_path)
+    def __init__(self, config_dict: dict):
+        self.config = config_dict or {}
         # 預設模式改為 'hf_model' 以追求最高效能
         self.mode = self.config.get("ai_detector", {}).get("mode", "hf_model")
         self.api_key = self.config.get("ai_detector", {}).get("api_key", "")
         self.api_url = self.config.get("ai_detector", {}).get("api_url", "https://api.gptzero.me/v2/predict/text")
         
-        # 如果是 HF 模式，初始化載入模型與分詞器 (避免每次分析重複載入)
+        # 如果是 HF 模式，初始化載入模型與分詞器 (利用 Streamlit cache 避免重複載入)
         self.hf_model = None
         self.tokenizer = None
         self.device = None
         if self.mode == "hf_model":
-            self._init_hf_model()
-
-    def _load_config(self, path: str) -> dict:
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
-
-    def _init_hf_model(self):
-        """初始化 Hugging Face 本地神經網路模型"""
-        print("[System] 正在載入 Desklib AI 偵測神經網路模型...")
-        model_directory = "desklib/ai-text-detector-v1.01"
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_directory)
-        self.hf_model = DesklibAIDetectionModel.from_pretrained(model_directory).to(self.device)
-        self.hf_model.eval() # 設置為評估模式
-        print(f"[System] 模型載入完成！使用運算裝置: {self.device}")
+            self.tokenizer, self.hf_model, self.device = get_hf_detector_model()
 
     def analyze(self, text: str, llm_interface=None) -> dict:
         """
