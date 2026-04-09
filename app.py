@@ -22,7 +22,7 @@ except (ImportError, Exception):
 # 匯入自定義模組
 from models.paper import Paper
 from models.reviewer import ReviewerAgent
-from llm.interface import LLMInterface, get_local_llama_instance
+from llm.interface import LLMInterface
 from core.orchestrator import PaperReviewOrchestrator
 from core.ai_detector import AIDetector
 
@@ -59,21 +59,34 @@ def extract_text_from_file(uploaded_file):
     """ 根據檔案副檔名提取文字內容 [新功能] """
     file_extension = uploaded_file.name.split('.')[-1].lower()
     
-    if file_extension == "txt":
-        return uploaded_file.getvalue().decode("utf-8")
+    # 確保檔案指標在起始位置
+    uploaded_file.seek(0)
     
-    elif file_extension == "pdf":
-        pdf_reader = pypdf.PdfReader(BytesIO(uploaded_file.read()))
-        text = ""
-        for page in pdf_reader.pages:
-            content = page.extract_text()
-            if content:
-                text += content + "\n"
-        return text
-    
-    elif file_extension == "docx":
-        doc = docx.Document(BytesIO(uploaded_file.read()))
-        return "\n".join([para.text for para in doc.paragraphs])
+    try:
+        if file_extension == "txt":
+            return uploaded_file.getvalue().decode("utf-8")
+        
+        elif file_extension == "pdf":
+            pdf_reader = pypdf.PdfReader(BytesIO(uploaded_file.read()))
+            text = ""
+            for page in pdf_reader.pages:
+                content = page.extract_text()
+                if content:
+                    text += content + "\n"
+            return text
+        
+        elif file_extension == "docx":
+            try:
+                doc = docx.Document(BytesIO(uploaded_file.read()))
+                return "\n".join([para.text for para in doc.paragraphs])
+            except Exception as e:
+                # 專門處理 docx 結構錯誤
+                if "no relationship of type" in str(e):
+                    raise ValueError("該 Word 檔案結構不完整。請嘗試在 Word 中「另存新檔」為標準 .docx 格式後再次上傳。")
+                raise e
+        
+    except Exception as e:
+        raise Exception(f"解析 {file_extension.upper()} 失敗：{str(e)}")
     
     return ""
 
@@ -97,32 +110,31 @@ if not os.path.exists(config_path):
     with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(default_config, f, indent=4)
 
-def load_default_config():
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return {
-            "llm_mode": "mock",
-            "cloud": {"api_key": "", "model_name": "gpt-4o", "api_url": "https://api.openai.com/v1/chat/completions"},
-            "local": {"model_path": "./local_models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf", "n_ctx": 4096, "max_tokens": 1024},
-            "ai_detector": {"api_key": "", "api_url": "https://api.gptzero.me/v2/predict/text"}
-        }
+def load_config():
+    with open(config_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+def save_config(config):
+    with open(config_path, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=4, ensure_ascii=False)
+
+app_config = load_config()
 
 # 初始化 Session State
-if "app_config" not in st.session_state:
-    st.session_state.app_config = load_default_config()
-
-# 指派引用：後續直接修改 app_config 內的值，即可達成會話隔離
-app_config = st.session_state.app_config
 if "review_history" not in st.session_state:
     st.session_state.review_history = None
+
+if "ai_report" not in st.session_state:
+    st.session_state.ai_report = None
 
 if "reviewers" not in st.session_state:
     st.session_state.reviewers = [
         ReviewerAgent("Dr. Alan", "電腦視覺與深度學習", "輕量化神經網路", "嚴格，要求完整數據驗證。"),
         ReviewerAgent("Prof. Lin", "嵌入式與邊緣運算", "微控制器整合", "務實，重視硬體資源消耗。")
     ]
+
+if "config" not in st.session_state:
+    st.session_state.config = load_config()
 
 # ----------------- 側邊欄 -----------------
 
@@ -132,20 +144,41 @@ with st.sidebar:
     
     st.divider()
     st.subheader("🤖 LLM 快速切換")
-    mode_options = ["cloud", "local", "mock"]
-    current_index = mode_options.index(app_config.get("llm_mode", "mock")) if app_config.get("llm_mode", "mock") in mode_options else 2
+    llm_modes = {
+        "local": "💻 本地落地模型 (llama-cpp)",
+        "ollama": "🐑 Ollama API (推薦)",
+        "cloud": "☁️ 雲端大型模型",
+        "mock": "🛠️ 模擬測試模式"
+    }
     
+    current_mode = st.session_state.config.get("llm_mode", "mock")
+    # 確保當前模式在選項中，不在則預設為 mock
+    if current_mode not in llm_modes:
+        current_mode = "mock"
+        
     selected_mode = st.selectbox(
-        "切換 LLM 推論模式", 
-        mode_options, 
-        index=current_index,
-        format_func=lambda x: {"cloud": "☁️ 雲端 API", "local": "💻 本地落地模型", "mock": "🛠️ 模擬測試"}[x]
+        "切換 LLM 推論模式",
+        options=list(llm_modes.keys()),
+        index=list(llm_modes.keys()).index(current_mode),
+        format_func=lambda x: llm_modes[x]
     )
 
-    if selected_mode != app_config.get("llm_mode"):
-        app_config["llm_mode"] = selected_mode
-        st.success(f"模式已切換為：{selected_mode}")
+    if selected_mode != current_mode:
+        st.session_state.config["llm_mode"] = selected_mode
+        save_config(st.session_state.config)
+        st.success(f"已切換至 {llm_modes[selected_mode]}")
         st.rerun()
+
+    st.divider()
+    if st.button("🔍 檢測推論硬體狀態"):
+        with st.status("正在檢測硬體資源...", expanded=True) as status:
+            # 僅在按下按鈕時初始化介面以讀取狀態
+            llm_service = LLMInterface(config_path="config.json")
+            detector = AIDetector(config_path="config.json")
+            
+            st.write(f"🔹 **LLM 推論：** {llm_service.hardware_info}")
+            st.write(f"🔹 **AI 偵測：** {detector.hardware_info}")
+            status.update(label="檢測完成！", state="complete", expanded=True)
 
 # ----------------- 分頁 1：參數設定 -----------------
 
@@ -224,8 +257,8 @@ if app_mode == "⚙️ 參數設定":
                 if app_config["cloud"]["api_key"] == "YOUR_NEW_GEMINI_API_KEY" or not app_config["cloud"]["api_key"]:
                     st.error("請先填入您從 Google AI Studio 取得的新 API Key！")
                 else:
+                    llm_service = LLMInterface(config_path="config.json")
                     # 使用目前畫面上填寫的 API Key 進行偵測，不需先儲存
-                    llm_service = LLMInterface(config_dict=app_config)
                     available_models = llm_service.list_models(api_key=app_config["cloud"]["api_key"])
                     st.write(f"**可用模型清單：**\n{available_models}")
         # ---------------------------------------------------------
@@ -286,7 +319,10 @@ if app_mode == "⚙️ 參數設定":
         app_config["local"]["n_ctx"] = st.number_input("上下文窗口 (n_ctx)", value=app_config["local"].get("n_ctx", 4096), step=1024)
         app_config["local"]["max_tokens"] = st.number_input("最大輸出 (max_tokens)", value=app_config["local"].get("max_tokens", 1024), step=256)
 
-    st.info("💡 提示：所有設定修改皆會在不干擾他人的情況下為您即時套用。")
+    if st.button("💾 儲存並套用設定", type="primary"):
+        save_config(app_config)
+        st.success("設定檔已成功更新！")
+        st.rerun()
 
 # ----------------- 分頁 2：主頁面 -----------------
 
@@ -315,65 +351,119 @@ else:
                     st.warning("檔案解析完成，但未偵測到有效文字。")
             except Exception as e:
                 st.error(f"解析失敗：{e}")
+        
+        # 當上傳新檔案時，清除舊的 AI 偵測結果
+        if "last_uploaded_file" not in st.session_state or st.session_state.last_uploaded_file != uploaded_file.name:
+            st.session_state.ai_report = None
+            st.session_state.last_uploaded_file = uploaded_file.name
     
     paper_content_input = st.text_area("或直接貼上/編輯論文內容", value=paper_content, height=200)
     final_paper_content = paper_content_input
 
     # 2. AI 寫作偵測
     st.header("🔍 2. AI 寫作偵測")
-    if st.button("執行 AI 寫作分析", icon="🔎"):
+    col_btn1, col_btn2 = st.columns([0.2, 0.8])
+    with col_btn1:
+        execute_btn = st.button("執行 AI 寫作分析", icon="🔎", type="primary")
+    with col_btn2:
+        clear_btn = st.button("🧼 清除分析結果")
+    
+    if clear_btn:
+        st.session_state.ai_report = None
+        st.rerun()
+
+    if execute_btn:
         if not final_paper_content.strip():
             st.warning("請先輸入或上傳論文內容！")
         else:
-            local_instance = get_local_llama_instance() if app_config.get("llm_mode") == "local" or app_config.get("ai_detector", {}).get("mode") == "local" else None
-            llm_service = LLMInterface(config_dict=app_config, local_llm_instance=local_instance)
-            detector = AIDetector(config_dict=app_config)
+            llm_service = LLMInterface(config_path="config.json")
+            detector = AIDetector(config_path="config.json")
             with st.spinner("AI 偵測分析中..."):
                  # 傳遞正在使用的 LLM 介面給偵測器 (僅在本地模式需要)
                  report = detector.analyze(final_paper_content, llm_interface=llm_service)
-                 
-                 if "notice" in report:
-                     st.warning(f"⚠️ 注意：{report['notice']}")
-                 
-                 st.subheader(f"📊 偵測報告 (AI 比例：{report['ai_ratio']}%)")
-                 
-                 if report.get("summary"):
-                     st.info(f"📝 **分析摘要：** {report['summary']}")
+                 st.session_state.ai_report = report
+                 st.success("分析完成！")
 
-                 # 渲染顏色標示 (包含 Tooltip 提示理由)
-                 # 考量到本地模型萃取的句子可能不與原句完全一致，我們直接顯示偵測出的 segments
-                 highlighted_html = "<div style='line-height:1.8; border:1px solid #ddd; padding:20px; border-radius:10px; background-color:#fafafa; color:#333; font-size:16px;'>"
-                 
-                 found_ai = False
-                 for seg in report['segments']:
-                     if seg['type'] == 'AI':
-                         found_ai = True
-                         reason = seg.get('reason', 'AI 生成嫌疑')
-                         highlighted_html += f"<span style='background-color:{seg['color']}; border-radius:3px; cursor:help; margin-right:2px;' title='{reason}'>{seg['text']}</span> "
-                     else:
-                         highlighted_html += f"<span>{seg['text']}</span> "
-                 
-                 highlighted_html += "</div>"
-                 st.markdown(highlighted_html, unsafe_allow_html=True)
-                 
-                 if found_ai:
-                     st.caption("💡 提示：將滑鼠移至紅色標記文字上可查看詳細判定理由。")
-                 else:
-                     st.caption("✅ 未偵測到明顯 AI 生成嫌疑句。")
-                 
-                 # 5. 詳細數據表格呈現 (應使用者要求)
-                 with st.expander("📊 查看詳細偵測數據表格", expanded=False):
-                     import pandas as pd
-                     df_data = []
-                     for seg in report['segments']:
-                         df_data.append({
-                             "類型": "🤖 AI" if seg['type'] == 'AI' else "👤 人類",
-                             "機率": f"{seg.get('prob', 0)*100:.1f}%" if seg.get('prob') is not None else "-",
-                             "內容片段": seg['text'],
-                             "判定理由": seg.get('reason', '-')
-                        })
-                     if df_data:
-                         st.dataframe(pd.DataFrame(df_data), use_container_width=True)
+    # 顯示分析結果 (渲染邏輯移出按鈕判斷區，以支援 Session State 持久化)
+    if st.session_state.ai_report:
+        report = st.session_state.ai_report
+        
+        if "notice" in report:
+            st.warning(f"⚠️ 注意：{report['notice']}")
+        
+        # 顯示推論模型名稱 [新功能]
+        st.success(f"🤖 **推論模型：** {report.get('model_name', '未知模型')}")
+        
+        st.subheader(f"📊 偵測報告 (AI 比例：{report['ai_ratio']}%)")
+        
+        if report.get("summary"):
+            st.info(f"📝 **分析摘要：** {report['summary']}")
+
+        # 渲染顏色標示 (包含 Tooltip 提示理由)
+        highlighted_html = "<div style='line-height:1.8; border:1px solid #ddd; padding:20px; border-radius:10px; background-color:#fafafa; color:#333; font-size:16px;'>"
+        
+        found_ai = False
+        for seg in report['segments']:
+            if seg['type'] == 'AI':
+                found_ai = True
+                reason = seg.get('reason', 'AI 生成嫌疑')
+                highlighted_html += f"<span style='background-color:{seg['color']}; border-radius:3px; cursor:help; margin-right:2px;' title='{reason}'>{seg['text']}</span> "
+            else:
+                highlighted_html += f"<span>{seg['text']}</span> "
+        
+        highlighted_html += "</div>"
+        st.markdown(highlighted_html, unsafe_allow_html=True)
+        
+        if found_ai:
+            st.caption("💡 提示：將滑鼠移至紅色標記文字上可查看詳細判定理由。")
+        else:
+            st.caption("✅ 未偵測到明顯 AI 生成嫌疑句。")
+        
+        # 5. 詳細數據表格呈現
+        with st.expander("📊 查看詳細偵測數據表格", expanded=False):
+            import pandas as pd
+            df_data = []
+            for seg in report['segments']:
+                df_data.append({
+                    "類型": "🤖 AI" if seg['type'] == 'AI' else "👤 人類",
+                    "機率": f"{seg.get('prob', 0)*100:.1f}%" if seg.get('prob') is not None else "-",
+                    "內容片段": seg['text'],
+                    "判定理由": seg.get('reason', '-')
+               })
+            if df_data:
+                st.dataframe(pd.DataFrame(df_data), use_container_width=True)
+
+        # 增加匯出功能
+        st.divider()
+        col_exp1, col_exp2 = st.columns(2)
+        with col_exp1:
+            json_report = json.dumps(report, indent=4, ensure_ascii=False)
+            st.download_button(
+                label="📥 匯出完整 JSON 報告",
+                data=json_report,
+                file_name=f"AI_Detector_Report_{paper_title if paper_title else 'Untitled'}.json",
+                mime="application/json",
+                key="json_download_btn" # 增加 key 以防衝突
+            )
+        with col_exp2:
+            md_report = f"# AI 寫作偵測報告\n\n"
+            md_report += f"- **論文標題：** {paper_title if paper_title else '未命名'}\n"
+            md_report += f"- **推論模型：** {report.get('model_name', '未知')}\n"
+            md_report += f"- **AI 比例：** {report['ai_ratio']}%\n"
+            md_report += f"- **分析摘要：** {report.get('summary', '無')}\n\n"
+            md_report += "## 詳細分析\n\n"
+            for seg in report['segments']:
+                md_report += f"- [{seg['type']}] {seg['text']}\n"
+                if seg.get('reason'):
+                     md_report += f"  - *原因：{seg['reason']}*\n"
+            
+            st.download_button(
+                label="📄 匯出 Markdown 摘要",
+                data=md_report,
+                file_name=f"AI_Detector_Report_{paper_title if paper_title else 'Untitled'}.md",
+                mime="text/markdown",
+                key="md_download_btn" # 增加 key
+            )
 
     # 3. 審查委員配置
     st.header("👥 3. 審查委員配置")
@@ -399,8 +489,7 @@ else:
             return
 
         my_paper = Paper(title=paper_title, field=paper_field, content=final_paper_content)
-        local_instance = get_local_llama_instance() if app_config.get("llm_mode") == "local" else None
-        llm_service = LLMInterface(config_dict=app_config, local_llm_instance=local_instance)
+        llm_service = LLMInterface(config_path="config.json")
         orchestrator = PaperReviewOrchestrator(paper=my_paper, reviewers=st.session_state.reviewers, llm=llm_service)
 
         st.divider()
