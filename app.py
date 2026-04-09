@@ -226,8 +226,33 @@ if app_mode == "⚙️ 參數設定":
         
         st.divider()
         st.subheader("🔍 AI Detector 設定")
-        app_config["ai_detector"]["api_key"] = st.text_input("GPTZero API Key", value=app_config["ai_detector"].get("api_key", ""), type="password")
-        app_config["ai_detector"]["api_url"] = st.text_input("API 端點", value=app_config["ai_detector"].get("api_url", "https://api.gptzero.me/v2/predict/text"))
+        
+        detector_modes = ["Hugging Face 神經網路 (推薦)", "GPTZero API (雲端)", "本地落地模型 (Local LLM)"]
+        current_detector_mode = app_config["ai_detector"].get("mode", "hf_model")
+        
+        if current_detector_mode == "hf_model":
+            detector_index = 0
+        elif current_detector_mode == "cloud":
+            detector_index = 1
+        else:
+            detector_index = 2
+        
+        selected_detector_mode = st.radio("偵測模式", detector_modes, index=detector_index, horizontal=False)
+        
+        if "Hugging Face" in selected_detector_mode:
+            app_config["ai_detector"]["mode"] = "hf_model"
+        elif "本地" in selected_detector_mode:
+            app_config["ai_detector"]["mode"] = "local"
+        else:
+            app_config["ai_detector"]["mode"] = "cloud"
+
+        if app_config["ai_detector"]["mode"] == "cloud":
+            app_config["ai_detector"]["api_key"] = st.text_input("GPTZero API Key", value=app_config["ai_detector"].get("api_key", ""), type="password")
+            app_config["ai_detector"]["api_url"] = st.text_input("API 端點", value=app_config["ai_detector"].get("api_url", "https://api.gptzero.me/v2/predict/text"))
+        elif app_config["ai_detector"]["mode"] == "hf_model":
+            st.info("Hugging Face 模式將不需聯網，直接使用 Desklib 神經網路模型處理 (效能與精準度最佳)。")
+        else:
+            st.info("本地模式將優先使用您在「💻 本地 LLM 設定」中載入的模型。注意：大模型極度消耗運算資源，且請確保上下文窗口 (n_ctx) 足夠容納全文。")
 
     with col_b:
         st.subheader("💻 本地 LLM 設定 (GGUF)")
@@ -297,20 +322,54 @@ else:
         if not final_paper_content.strip():
             st.warning("請先輸入或上傳論文內容！")
         else:
-            detector = AIDetector()
-            with st.spinner("分析中..."):
-                report = detector.analyze(final_paper_content)
-                st.subheader(f"📊 偵測報告 (AI 比例：{report['ai_ratio']}%)")
-                
-                # 渲染顏色標示
-                highlighted_html = "<div style='line-height:1.8; border:1px solid #ddd; padding:20px; border-radius:10px; background-color:#fafafa; color:#333; font-size:16px;'>"
-                for seg in report['segments']:
-                    if seg['type'] == 'AI':
-                        highlighted_html += f"<span style='background-color:{seg['color']}; border-radius:3px;'>{seg['text']}</span>"
-                    else:
-                        highlighted_html += f"<span>{seg['text']}</span>"
-                highlighted_html += "</div>"
-                st.markdown(highlighted_html, unsafe_allow_html=True)
+            llm_service = LLMInterface(config_path="config.json")
+            detector = AIDetector(config_path="config.json")
+            with st.spinner("AI 偵測分析中..."):
+                 # 傳遞正在使用的 LLM 介面給偵測器 (僅在本地模式需要)
+                 report = detector.analyze(final_paper_content, llm_interface=llm_service)
+                 
+                 if "notice" in report:
+                     st.warning(f"⚠️ 注意：{report['notice']}")
+                 
+                 st.subheader(f"📊 偵測報告 (AI 比例：{report['ai_ratio']}%)")
+                 
+                 if report.get("summary"):
+                     st.info(f"📝 **分析摘要：** {report['summary']}")
+
+                 # 渲染顏色標示 (包含 Tooltip 提示理由)
+                 # 考量到本地模型萃取的句子可能不與原句完全一致，我們直接顯示偵測出的 segments
+                 highlighted_html = "<div style='line-height:1.8; border:1px solid #ddd; padding:20px; border-radius:10px; background-color:#fafafa; color:#333; font-size:16px;'>"
+                 
+                 found_ai = False
+                 for seg in report['segments']:
+                     if seg['type'] == 'AI':
+                         found_ai = True
+                         reason = seg.get('reason', 'AI 生成嫌疑')
+                         highlighted_html += f"<span style='background-color:{seg['color']}; border-radius:3px; cursor:help; margin-right:2px;' title='{reason}'>{seg['text']}</span> "
+                     else:
+                         highlighted_html += f"<span>{seg['text']}</span> "
+                 
+                 highlighted_html += "</div>"
+                 st.markdown(highlighted_html, unsafe_allow_html=True)
+                 
+                 if found_ai:
+                     st.caption("💡 提示：將滑鼠移至紅色標記文字上可查看詳細判定理由。")
+                 else:
+                     st.caption("✅ 未偵測到明顯 AI 生成嫌疑句。")
+                 
+                 # 5. 詳細數據表格呈現 (應使用者要求)
+                 with st.expander("📊 查看詳細偵測數據表格", expanded=False):
+                     import pandas as pd
+                     df_data = []
+                     for seg in report['segments']:
+                         df_data.append({
+                             "類型": "🤖 AI" if seg['type'] == 'AI' else "👤 人類",
+                             "機率": f"{seg.get('prob', 0)*100:.1f}%" if seg.get('prob') is not None else "-",
+                             "內容片段": seg['text'],
+                             "判定理由": seg.get('reason', '-')
+                        })
+                     if df_data:
+                         st.dataframe(pd.DataFrame(df_data), use_container_width=True)
 
     # 3. 審查委員配置
     st.header("👥 3. 審查委員配置")
