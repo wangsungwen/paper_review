@@ -55,6 +55,16 @@ def resource_path(relative_path):
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
+# 配置文件路徑處理 (確保打包後設定可持久化)
+config_name = "config.json"
+if getattr(sys, 'frozen', False):
+    # 如果是打包後的執行檔，將設定檔放在 exe 旁邊，而不是 _internal 資料夾內
+    base_dir = os.path.dirname(sys.executable)
+    config_path = os.path.join(base_dir, config_name)
+else:
+    # 開發模式下使用當前目錄
+    config_path = os.path.abspath(config_name)
+
 def extract_text_from_file(uploaded_file):
     """ 根據檔案副檔名提取文字內容 [新功能] """
     file_extension = uploaded_file.name.split('.')[-1].lower()
@@ -290,6 +300,13 @@ if app_mode == "⚙️ 參數設定":
             app_config["ai_detector"]["api_url"] = st.text_input("API 端點", value=app_config["ai_detector"].get("api_url", "https://api.gptzero.me/v2/predict/text"))
         elif app_config["ai_detector"]["mode"] == "hf_model":
             st.info("Hugging Face 模式將不需聯網，直接使用 Desklib 神經網路模型處理 (效能與精準度最佳)。")
+            
+            # 針對 Blackwell (RTX 50 系列) 的硬體相容性開關
+            app_config["ai_detector"]["force_cpu"] = st.checkbox(
+                "強制使用 CPU 進行 AI 偵測", 
+                value=app_config["ai_detector"].get("force_cpu", False),
+                help="如果您的顯卡 (如 RTX 5090) 遇到 CUDA no kernel image 錯誤，請開啟此選項。CPU 跑小模型依然很快。"
+            )
         else:
             st.info("本地模式將優先使用您在「💻 本地 LLM 設定」中載入的模型。注意：大模型極度消耗運算資源，且請確保上下文窗口 (n_ctx) 足夠容納全文。")
 

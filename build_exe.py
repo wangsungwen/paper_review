@@ -38,9 +38,18 @@ hidden_imports = [
 # 執行打包
 PyInstaller.__main__.run([
     "run_app.py",
-    "--onedir", # 使用資料夾模式更穩定，啟動速度也較快
+    "--onedir",
     "--name=PaperReviewSystem",
     *data_args,
-    *[f"--hidden-import={m}" for m in hidden_imports],
+    "--collect-all=streamlit",
+    "--collect-all=torch",
+    "--collect-all=transformers",
+    "--collect-all=pyarrow",
+    "--collect-all=altair",
+    "--collect-all=pypdf",
+    "--collect-all=docx", # python-docx
+    "--collect-all=requests",
+    "--copy-metadata=streamlit", # 解決 PackageNotFoundError
+    "--noconfirm", # 自動覆寫舊檔
     "--clean",
 ])
