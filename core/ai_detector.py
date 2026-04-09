@@ -52,37 +52,59 @@ class DesklibAIDetectionModel(PreTrainedModel):
             output["loss"] = loss
         return output
 
-import streamlit as st
-
-@st.cache_resource(show_spinner="正在載入神經網路鑑識模型... (這只需執行一次)")
-def get_hf_detector_model():
-    print("[System] 正在載入 Desklib AI 偵測神經網路模型...")
-    model_directory = "desklib/ai-text-detector-v1.01"
-    # 若模型不存在，請確保預先被下載放入該資料夾
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = AutoTokenizer.from_pretrained(model_directory)
-    hf_model = DesklibAIDetectionModel.from_pretrained(model_directory).to(device)
-    hf_model.eval() # 設置為評估模式
-    print(f"[System] 模型載入完成！使用運算裝置: {device}")
-    return tokenizer, hf_model, device
-
 # ==========================================
 # 主要偵測器類別
 # ==========================================
 class AIDetector:
-    def __init__(self, config_dict: dict):
-        self.config = config_dict or {}
+    def __init__(self, config_path: str = "config.json"):
+        self.config = self._load_config(config_path)
         # 預設模式改為 'hf_model' 以追求最高效能
         self.mode = self.config.get("ai_detector", {}).get("mode", "hf_model")
         self.api_key = self.config.get("ai_detector", {}).get("api_key", "")
         self.api_url = self.config.get("ai_detector", {}).get("api_url", "https://api.gptzero.me/v2/predict/text")
         
-        # 如果是 HF 模式，初始化載入模型與分詞器 (利用 Streamlit cache 避免重複載入)
+        # 如果是 HF 模式，初始化載入模型與分詞器 (避免每次分析重複載入)
         self.hf_model = None
         self.tokenizer = None
         self.device = None
         if self.mode == "hf_model":
-            self.tokenizer, self.hf_model, self.device = get_hf_detector_model()
+            self._init_hf_model()
+
+    def _load_config(self, path: str) -> dict:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _init_hf_model(self):
+        """初始化 Hugging Face 本地神經網路模型"""
+        print("[System] 正在載入 Desklib AI 偵測神經網路模型...")
+        model_directory = "desklib/ai-text-detector-v1.01"
+        
+        # 檢查是否強制使用 CPU (針對 RTX 5090 等尚未支援 Stable CUDA 核心的硬體)
+        force_cpu = self.config.get("ai_detector", {}).get("force_cpu", False)
+        if force_cpu:
+            self.device = torch.device("cpu")
+        else:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            
+        self.tokenizer = AutoTokenizer.from_pretrained(model_directory)
+        self.hf_model = DesklibAIDetectionModel.from_pretrained(model_directory).to(self.device)
+        self.hf_model.eval() # 設置為評估模式
+        print(f"[System] 模型載入完成！使用運算裝置: {self.device}")
+
+    @property
+    def hardware_info(self) -> str:
+        """ 返回目前使用的推論硬體 """
+        if self.mode == "cloud":
+            return "☁️ Cloud API (GPTZero)"
+        if self.mode == "hf_model" and self.device:
+            dev_name = "GPU (CUDA)" if "cuda" in str(self.device).lower() else "CPU"
+            return f"💻 Local {dev_name}"
+        if self.mode == "local":
+            return "💻 Local LLM Shared"
+        return "❓ 未知"
 
     def analyze(self, text: str, llm_interface=None) -> dict:
         """
@@ -140,6 +162,7 @@ class AIDetector:
 
             return {
                 "ai_ratio": round(overall_prob * 100, 2),
+                "model_name": "Desklib AI Text Detector v1.01 (Neural Network)",
                 "task_type": "Neural Network Analysis",
                 "summary": f"由 Desklib 專用神經網路模型進行精準量化分析。整體 AI 生成機率為 {overall_prob*100:.1f}%。",
                 "segments": segments
@@ -200,6 +223,7 @@ class AIDetector:
                     data.setdefault("ai_ratio", 0.0)
                     data.setdefault("segments", [])
                     data.setdefault("summary", "本地模型成功完成分析，但未提供摘要。")
+                    data["model_name"] = self.config.get("local", {}).get("model_path", "Local LLM").split("/")[-1].split("\\")[-1]
                     return data
                 except json.JSONDecodeError:
                     return self._mock_analyze(text, "模型輸出了不合法的 JSON。")
@@ -227,9 +251,13 @@ class AIDetector:
                     "type": "AI" if p > 0.7 else "Human",
                     "color": "#ffcccc" if p > 0.7 else "transparent"
                 })
-            return {"ai_ratio": round(doc.get("completely_generated_prob", 0) * 100, 2), "segments": segments}
+            return {
+                "ai_ratio": round(doc.get("completely_generated_prob", 0) * 100, 2), 
+                "segments": segments,
+                "model_name": "GPTZero API (Cloud)"
+            }
         except Exception as e:
             return self._mock_analyze(text, f"Cloud 服務異常：{str(e)}")
 
     def _mock_analyze(self, text: str, reason: str) -> dict:
-        return {"ai_ratio": 0.0, "segments": [{"text": text, "type": "Error", "color": "transparent"}], "notice": reason}
+        return {"ai_ratio": 0.0, "segments": [{"text": text, "type": "Error", "color": "transparent"}], "notice": reason, "model_name": "Mock Detection"}
