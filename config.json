@@ -1,19 +1,25 @@
 {
-    "llm_mode": "cloud",
+    "llm_mode": "ollama",
     "cloud": {
-        "provider": "gemini",
-        "api_key": "YOUR_API_KEY_HERE",
-        "model_name": "gemini-2.5-flash",
+        "provider": "openai",
+        "api_key": "YOUR_OPENAI_API_KEY_HERE",
+        "model_name": "gpt-4o",
         "api_url": "https://api.openai.com/v1/chat/completions"
     },
     "local": {
-        "model_path": "F:/Coding/paper_review_system/local_models/Gemma-3-TAIDE-12b-Chat-Q4_K_M.gguf",
+        "model_path": "./local_models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf",
         "n_ctx": 16384,
         "max_tokens": 8192
     },
     "ai_detector": {
         "api_key": "YOUR_GPTZERO_API_KEY_HERE",
         "api_url": "https://api.gptzero.me/v2/predict/text",
-        "mode": "hf_model"
+        "mode": "hf_model",
+        "force_cpu": true
+    },
+    "ollama": {
+        "host": "http://localhost:11434",
+        "model_name": "llama3.1",
+        "max_tokens": 4096
     }
 }
