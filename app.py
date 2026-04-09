@@ -22,7 +22,7 @@ except (ImportError, Exception):
 # 匯入自定義模組
 from models.paper import Paper
 from models.reviewer import ReviewerAgent
-from llm.interface import LLMInterface
+from llm.interface import LLMInterface, get_local_llama_instance
 from core.orchestrator import PaperReviewOrchestrator
 from core.ai_detector import AIDetector
 
@@ -97,17 +97,24 @@ if not os.path.exists(config_path):
     with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(default_config, f, indent=4)
 
-def load_config():
-    with open(config_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
-
-def save_config(config):
-    with open(config_path, 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=4, ensure_ascii=False)
-
-app_config = load_config()
+def load_default_config():
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {
+            "llm_mode": "mock",
+            "cloud": {"api_key": "", "model_name": "gpt-4o", "api_url": "https://api.openai.com/v1/chat/completions"},
+            "local": {"model_path": "./local_models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf", "n_ctx": 4096, "max_tokens": 1024},
+            "ai_detector": {"api_key": "", "api_url": "https://api.gptzero.me/v2/predict/text"}
+        }
 
 # 初始化 Session State
+if "app_config" not in st.session_state:
+    st.session_state.app_config = load_default_config()
+
+# 指派引用：後續直接修改 app_config 內的值，即可達成會話隔離
+app_config = st.session_state.app_config
 if "review_history" not in st.session_state:
     st.session_state.review_history = None
 
@@ -137,7 +144,6 @@ with st.sidebar:
 
     if selected_mode != app_config.get("llm_mode"):
         app_config["llm_mode"] = selected_mode
-        save_config(app_config)
         st.success(f"模式已切換為：{selected_mode}")
         st.rerun()
 
@@ -218,8 +224,8 @@ if app_mode == "⚙️ 參數設定":
                 if app_config["cloud"]["api_key"] == "YOUR_NEW_GEMINI_API_KEY" or not app_config["cloud"]["api_key"]:
                     st.error("請先填入您從 Google AI Studio 取得的新 API Key！")
                 else:
-                    llm_service = LLMInterface(config_path="config.json")
                     # 使用目前畫面上填寫的 API Key 進行偵測，不需先儲存
+                    llm_service = LLMInterface(config_dict=app_config)
                     available_models = llm_service.list_models(api_key=app_config["cloud"]["api_key"])
                     st.write(f"**可用模型清單：**\n{available_models}")
         # ---------------------------------------------------------
@@ -280,10 +286,7 @@ if app_mode == "⚙️ 參數設定":
         app_config["local"]["n_ctx"] = st.number_input("上下文窗口 (n_ctx)", value=app_config["local"].get("n_ctx", 4096), step=1024)
         app_config["local"]["max_tokens"] = st.number_input("最大輸出 (max_tokens)", value=app_config["local"].get("max_tokens", 1024), step=256)
 
-    if st.button("💾 儲存並套用設定", type="primary"):
-        save_config(app_config)
-        st.success("設定檔已成功更新！")
-        st.rerun()
+    st.info("💡 提示：所有設定修改皆會在不干擾他人的情況下為您即時套用。")
 
 # ----------------- 分頁 2：主頁面 -----------------
 
@@ -322,8 +325,9 @@ else:
         if not final_paper_content.strip():
             st.warning("請先輸入或上傳論文內容！")
         else:
-            llm_service = LLMInterface(config_path="config.json")
-            detector = AIDetector(config_path="config.json")
+            local_instance = get_local_llama_instance() if app_config.get("llm_mode") == "local" or app_config.get("ai_detector", {}).get("mode") == "local" else None
+            llm_service = LLMInterface(config_dict=app_config, local_llm_instance=local_instance)
+            detector = AIDetector(config_dict=app_config)
             with st.spinner("AI 偵測分析中..."):
                  # 傳遞正在使用的 LLM 介面給偵測器 (僅在本地模式需要)
                  report = detector.analyze(final_paper_content, llm_interface=llm_service)
@@ -395,7 +399,8 @@ else:
             return
 
         my_paper = Paper(title=paper_title, field=paper_field, content=final_paper_content)
-        llm_service = LLMInterface(config_path="config.json")
+        local_instance = get_local_llama_instance() if app_config.get("llm_mode") == "local" else None
+        llm_service = LLMInterface(config_dict=app_config, local_llm_instance=local_instance)
         orchestrator = PaperReviewOrchestrator(paper=my_paper, reviewers=st.session_state.reviewers, llm=llm_service)
 
         st.divider()

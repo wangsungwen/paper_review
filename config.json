@@ -1,8 +1,8 @@
 {
-    "llm_mode": "local",
+    "llm_mode": "cloud",
     "cloud": {
         "provider": "gemini",
-        "api_key": "YOUR_API_KEY_HER",
+        "api_key": "AIzaSyBHliojOjeNuZvNmzPaRY0Hp1VXWpQHGgM",
         "model_name": "gemini-2.5-flash",
         "api_url": "https://api.openai.com/v1/chat/completions"
     },
@@ -14,6 +14,6 @@
     "ai_detector": {
         "api_key": "YOUR_GPTZERO_API_KEY_HERE",
         "api_url": "https://api.gptzero.me/v2/predict/text",
-        "mode": "local"
+        "mode": "hf_model"
     }
 }
