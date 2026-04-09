@@ -5,6 +5,7 @@ import os
 import asyncio
 import requests
 import time
+import sys
 
 try:
     from llama_cpp import Llama
@@ -21,60 +22,127 @@ def resource_path(relative_path):
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
-import streamlit as st
-
-@st.cache_resource(show_spinner="正在載入 Llama 核心... (這只需執行一次)")
-def get_local_llama_instance():
-    if not HAS_LLAMA_CPP:
-        print("警告：未安裝 llama-cpp-python，無法載入本地模型。")
-        return None
-        
-    try:
-        with open("config.json", 'r', encoding='utf-8') as f:
-            disk_config = json.load(f)
-    except Exception:
-        disk_config = {}
-        
-    model_path = disk_config.get("local", {}).get("model_path", "./local_models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf")
-    n_ctx = disk_config.get("local", {}).get("n_ctx", 4096)
-    
-    # 解析打包環境路徑
-    if not os.path.exists(model_path):
-        try:
-            base_path = sys._MEIPASS
-        except Exception:
-            base_path = os.path.abspath(".")
-        potential_path = os.path.join(base_path, model_path)
-        if os.path.exists(potential_path):
-            model_path = potential_path
-        else:
-            print(f"錯誤：找不到本地模型檔案 {model_path}")
-            return None
-
-    try:
-        print(f"[System] 正在記憶體常駐載入 Llama 模型: {model_path} (n_ctx: {n_ctx})")
-        return Llama(model_path=model_path, n_ctx=n_ctx, verbose=False)
-    except Exception as e:
-        print(f"載入 Llama 模型失敗：{e}")
-        return None
-
 class LLMInterface:
-    def __init__(self, config_dict: dict, local_llm_instance=None):
-        self.config = config_dict or {}
+    def __init__(self, config_path: str = "config.json"):
+        # 優先查找工作目錄下的 config.json，再查找打包內的
+        if os.path.exists(config_path):
+            self.config_path = config_path
+        else:
+            self.config_path = resource_path(config_path)
+            
+        self.config = self._load_config(self.config_path)
         self.mode = self.config.get("llm_mode", "mock")
-        self.local_llm = local_llm_instance
+        self.local_llm = None
 
-        if self.mode == "local" and not self.local_llm:
-             print("警告：尚未提供本地 LLM 實例，降級為模擬模式。")
-             self.mode = "mock"
+        if self.mode == "local":
+            if not HAS_LLAMA_CPP:
+                print("警告：未安裝 llama-cpp-python，無法使用本地模型。")
+                self.mode = "mock"
+            else:
+                model_path = self.config.get("local", {}).get("model_path", "")
+                
+                # 路徑處理：優先查看 CWD，再查看 _internal 內部
+                if not os.path.exists(model_path):
+                    potential_path = resource_path(model_path)
+                    if os.path.exists(potential_path):
+                        model_path = potential_path
+                    else:
+                        print(f"錯誤：找不到本地模型檔案 {model_path} 或 {potential_path}，將降級為模擬模式。")
+                        self.mode = "mock"
+                        return
+
+                if self.mode != "mock":
+                    n_ctx = self.config.get("local", {}).get("n_ctx", 4096)
+                    # 預設嘗試開啟 GPU 加速 (n_gpu_layers=-1 表示全卸載至 GPU)
+                    try:
+                        self.local_llm = Llama(
+                            model_path=model_path, 
+                            n_ctx=n_ctx, 
+                            n_gpu_layers=-1, # <--- 嘗試啟用 GPU
+                            verbose=False
+                        )
+                    except Exception as e:
+                        print(f"GPU 載入失敗，嘗試回退至 CPU：{e}")
+                        try:
+                            self.local_llm = Llama(model_path=model_path, n_ctx=n_ctx, verbose=False)
+                        except Exception as e2:
+                            print(f"載入模型失敗：{e2}")
+                            self.mode = "mock"
+
+    def _load_config(self, path: str) -> dict:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {"llm_mode": "mock"}
+
+    @property
+    def hardware_info(self) -> str:
+        """ 返回推論硬體狀態 """
+        if self.mode == "cloud":
+            return "☁️ Cloud API"
+        if self.mode == "mock":
+            return "🛠️ Mock (CPU)"
+        if self.mode == "ollama":
+            # 檢查 Ollama 是否在運行
+            ollama_host = self.config.get("ollama", {}).get("host", "http://localhost:11434")
+            try:
+                # 呼叫 Ollama 的 tags API 檢查健康度
+                resp = requests.get(f"{ollama_host}/api/tags", timeout=2)
+                if resp.status_code == 200:
+                    return "🐑 Ollama (Running)"
+                return "🐑 Ollama (API Error)"
+            except:
+                return "❌ Ollama (Not Found / Offline)"
+        
+        if self.local_llm:
+            try:
+                # llama-cpp-python context_params 有 n_gpu_layers
+                # 這裡使用 getattr 安全讀取，避免舊版本報錯
+                n_gpu = getattr(self.local_llm.context_params, 'n_gpu_layers', -2)
+                if n_gpu != 0:
+                    return f"💻 GPU (Offloaded {n_gpu} layers)"
+            except:
+                pass
+            return "💻 Local CPU"
+        return "❌ 未載入"
 
     async def generate_response(self, system_prompt: str, user_prompt: str) -> str:
         if self.mode == "local" and self.local_llm:
             return await asyncio.to_thread(self._generate_local_sync, system_prompt, user_prompt)
+        elif self.mode == "ollama":
+            return await asyncio.to_thread(self._generate_ollama_sync, system_prompt, user_prompt)
         elif self.mode == "cloud":
             return await self._generate_cloud_async(system_prompt, user_prompt)
         else:
             return await self._generate_mock_async(system_prompt, user_prompt)
+
+    def _generate_ollama_sync(self, system_prompt: str, user_prompt: str) -> str:
+        """ 透過 Ollama API 進行推論 """
+        ollama_config = self.config.get("ollama", {})
+        host = ollama_config.get("host", "http://localhost:11434")
+        model = ollama_config.get("model_name", "llama3.1")
+        
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "stream": False,
+            "options": {
+                "temperature": 0.2,
+                "num_predict": ollama_config.get("max_tokens", 4096)
+            }
+        }
+        
+        try:
+            response = requests.post(f"{host}/api/chat", json=payload, timeout=120)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("message", {}).get("content", "").strip()
+        except Exception as e:
+            return f"【Ollama 推論錯誤】：{str(e)}\n請確認 Ollama 已啟動且已下載 '{model}' 模型。"
 
     def _generate_local_sync(self, system_prompt: str, user_prompt: str) -> str:
         if not self.local_llm:
