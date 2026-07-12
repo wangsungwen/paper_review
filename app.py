@@ -39,6 +39,7 @@ from services.file_service import (
     extract_text_from_file,
     apply_text_filters,
 )
+from ui import theme as ui_theme
 
 
 # ===========================================================
@@ -77,6 +78,7 @@ def get_temp_user_config_path(user_conf):
 # ===========================================================
 
 st.set_page_config(page_title="多代理人論文審查系統", page_icon="🎓", layout="wide")
+ui_theme.inject_theme()
 
 config_path = config_service.ensure_config_exists()
 
@@ -142,7 +144,14 @@ if "manual_exclusions" not in st.session_state:
 # ===========================================================
 
 with st.sidebar:
-    st.header("🎮 工作區切換")
+    st.markdown(
+        '<div style="padding:.2rem 0 .6rem;">'
+        '<div style="font-size:1.15rem;font-weight:700;color:#1F4E79;">🎓 論文審查平台</div>'
+        '<div style="font-size:.8rem;color:#64748B;">Multi-Agent Paper Review</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    st.header("工作區切換")
     
     entry_mode = st.radio(
         "選擇進入入口", 
@@ -162,8 +171,8 @@ with st.sidebar:
     if entry_mode == "🌐 線上使用者":
         st.success("🔒 **安全隔離模式已啟動**\n您的設定僅存於記憶體中，關閉視窗即自動清除。")
         
-        st.subheader("🔑 推論引擎選擇")
-        st.caption("雲端/本地引擎")
+        st.subheader("推論引擎")
+        st.caption("選擇雲端或本地推論引擎")
         
         user_provider = st.radio(
             "選擇引擎", 
@@ -353,7 +362,7 @@ with st.sidebar:
 
 if entry_mode == "⚙️ 管理員 (參數設定)":
     
-    st.title("⚙️ 系統參數設定")
+    ui_theme.hero("系統參數設定", "管理員專用 · 推論引擎、AI 偵測與知識更新策略之全域配置")
     if not is_admin:
         st.warning("🔒 請先於左側輸入管理員密碼以解鎖設定介面。")
         st.stop()
@@ -599,13 +608,16 @@ if entry_mode == "⚙️ 管理員 (參數設定)":
 
 else:
     if entry_mode == "💻 管理員 (單機推論)" and not is_admin:
-        st.title("🎓 多代理人 AI 論文審查系統")
+        ui_theme.hero("多代理人 AI 論文審查系統", "Multi-Agent Academic Paper Review Platform")
         st.warning("🔒 請先於左側輸入系統管理員密碼以解鎖此區域。")
         st.stop()
-        
+
     col_t1, col_t2 = st.columns([0.8, 0.2])
     with col_t1:
-        st.title("🎓 多代理人 AI 論文審查系統")
+        ui_theme.hero(
+            "多代理人 AI 論文審查系統",
+            "三輪協作審查 · 動態知識擴充 · AI 寫作偵測",
+        )
     with col_t2:
         with st.popover("⚙️ 當前參數 (除錯專用)"):
             st.json(active_config)
@@ -617,8 +629,11 @@ else:
 
     # 資源監控與狀態列
     c1, c2 = st.columns([0.3, 0.7])
-    with c1: 
-        st.markdown(f"**目前推論模式**：<span style='color:#FF4B4B'>{active_config.get('llm_mode')}</span>", unsafe_allow_html=True)
+    with c1:
+        st.markdown(
+            f"目前推論模式&ensp;{ui_theme.badge(active_config.get('llm_mode', 'mock'))}",
+            unsafe_allow_html=True,
+        )
     with c2: 
         if st.button("🔍 檢測推論硬體狀態", help="檢測底層神經網路與 LLM 引擎狀態", use_container_width=True):
             with st.spinner("正在檢測硬體資源..."):
@@ -662,7 +677,7 @@ else:
     # ==========================================
     # 1. 論文資料設定
     # ==========================================
-    st.header("📄 1. 論文資料設定")
+    ui_theme.section_header("1", "論文資料設定", "上傳檔案或直接貼上待審查的論文內容")
     
     col_title, col_field = st.columns(2)
     with col_title:
@@ -708,8 +723,7 @@ else:
     # ==========================================
     knowledge_config = active_config.get("knowledge_update", {})
     if knowledge_config.get("enable_reference_upload"):
-        st.markdown("---")
-        st.markdown("#### 📚 1.2 補充最新參考文獻 (解決知識落差)")
+        ui_theme.section_header("1.2", "補充最新參考文獻", "動態注入領域新知，解決模型知識落差")
         st.info("💡 系統已開啟「動態參考文獻」功能。您可以上傳本領域最新的文獻 (支援多檔)，系統將自動解析並作為背景知識提供給代理人。")
         
         ref_files = st.file_uploader(
@@ -747,7 +761,7 @@ else:
     # ==========================================
     # 1.5 內容預處理與範圍界定
     # ==========================================
-    st.header("✂️ 1.5 內容預處理與清洗")
+    ui_theme.section_header("1.5", "內容預處理與清洗", "排除參考文獻、引用與指定字串，控制審查範圍")
     
     total_words = len(raw_paper_content)
     filtered_text = raw_paper_content
@@ -799,20 +813,12 @@ else:
     excluded_words = total_words - compared_words
 
     with col_set2:
-        st.markdown(f"""
-        <div style="border:1px solid #e0e0e0; border-radius:10px; padding:15px; text-align:center; margin-bottom:12px; background-color:#ffffff; box-shadow: 0 2px 5px rgba(0,0,0,0.05);">
-            <div style="color:#5f6368; font-size:16px; font-weight:500;">📄 文件原始總字數</div>
-            <div style="font-size:32px; font-weight:800; color:#202124;">{total_words:,}</div>
-        </div>
-        <div style="border:1px solid #fad2cf; border-radius:10px; padding:15px; text-align:center; margin-bottom:12px; background-color:#fce8e6; box-shadow: 0 2px 5px rgba(0,0,0,0.05);">
-            <div style="color:#d93025; font-size:16px; font-weight:500;">❌ 總計排除字數</div>
-            <div style="font-size:32px; font-weight:800; color:#d93025;">{excluded_words:,}</div>
-        </div>
-        <div style="border:1px solid #ceead6; border-radius:10px; padding:15px; text-align:center; background-color:#e6f4ea; box-shadow: 0 2px 5px rgba(0,0,0,0.05);">
-            <div style="color:#137333; font-size:16px; font-weight:500;">✅ 最終比對/審查字數</div>
-            <div style="font-size:32px; font-weight:800; color:#137333;">{compared_words:,}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            ui_theme.stat_card("文件原始總字數", total_words)
+            + ui_theme.stat_card("總計排除字數", excluded_words, kind="danger")
+            + ui_theme.stat_card("最終比對／審查字數", compared_words, kind="success"),
+            unsafe_allow_html=True,
+        )
 
         if compared_words > 30000:
             st.warning("⚠️ 注意：最終比對字數超過 30,000 字，可能因超過 Token 限制而報錯，建議進一步精簡。")
@@ -828,7 +834,7 @@ else:
     # ==========================================
     # 2. AI 寫作偵測
     # ==========================================
-    st.header("🔍 2. AI 寫作偵測")
+    ui_theme.section_header("2", "AI 寫作偵測", "逐句分析 AI 生成嫌疑，輸出比例與熱力標記")
     
     current_det_mode = active_config.get("ai_detector", {}).get("mode", "hf_model")
     
@@ -879,7 +885,7 @@ else:
         if report.get("summary"):
             st.info(f"📝 **分析摘要：** {report['summary']}")
 
-        highlighted_html = "<div style='line-height:1.8; border:1px solid #ddd; padding:20px; border-radius:10px; background-color:#fafafa; color:#333; font-size:16px;'>"
+        highlighted_html = "<div class='prs-doc'>"
         
         found_ai = False
         for seg in report['segments']:
@@ -948,7 +954,7 @@ else:
     # ==========================================
     # 3. 審查委員配置
     # ==========================================
-    st.header("👥 3. 審查委員配置")
+    ui_theme.section_header("3", "審查委員配置", "設定各代理人的專業領域與審查風格")
     
     with st.expander("➕ 管理審查委員", expanded=False):
         for i, reviewer in enumerate(st.session_state.reviewers):
@@ -968,7 +974,7 @@ else:
     # ==========================================
     # 4. 執行多代理人審查
     # ==========================================
-    st.header("🚀 4. 執行多代理人學術審查")
+    ui_theme.section_header("4", "執行多代理人學術審查", "獨立審查 → 交叉辯論 → 最終裁決")
 
     async def run_review_process():
         if not paper_title or not final_paper_content_for_llm.strip():
@@ -1027,8 +1033,7 @@ else:
     # 5. 結果展示與匯出
     # ==========================================
     if st.session_state.review_history:
-        st.divider()
-        st.header("📋 審查結果展示")
+        ui_theme.section_header("5", "審查結果與匯出", "三輪審查意見、量化評分與報告下載")
         
         if st.session_state.review_stats:
             stats = st.session_state.review_stats

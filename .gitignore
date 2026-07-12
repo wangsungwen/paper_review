@@ -13,7 +13,8 @@ ENV/
 local_models/
 .gemini/
 *.log
-.streamlit/
+.streamlit/*
+!.streamlit/config.toml
 
 # Config (containing sensitive keys)
 config.json
