@@ -35,6 +35,12 @@ LIGHT = {
     "badge_text": "#1F4E79",
     "input_bg": "#FFFFFF",
     "primary_text": "#FFFFFF",
+    "btn_bg": "#FFFFFF",
+    "btn_text": "#1F2937",
+    "btn_border": "#94A3B8",
+    "btn_primary_bg": "#1F4E79",
+    "btn_primary_hover": "#2A639A",
+    "btn_primary_text": "#FFFFFF",
 }
 
 DARK = {
@@ -60,6 +66,12 @@ DARK = {
     "badge_text": "#AECDE8",
     "input_bg": "#0F1B2E",
     "primary_text": "#0F172A",
+    "btn_bg": "#2A3B55",
+    "btn_text": "#F8FAFC",
+    "btn_border": "#64748B",
+    "btn_primary_bg": "#2D6FB8",
+    "btn_primary_hover": "#3D82CC",
+    "btn_primary_text": "#FFFFFF",
 }
 
 _CSS_TEMPLATE = """
@@ -102,31 +114,52 @@ h1, h2, h3, h4, h5, h6, p, li, label,
     color: {primary};
 }}
 
-/* ---------- 按鈕 ---------- */
+/* ---------- 按鈕 (涵蓋新舊版 Streamlit DOM，強制高對比) ---------- */
+[data-testid="stButton"] button, [data-testid="stDownloadButton"] button,
+[data-testid="stFormSubmitButton"] button,
 .stButton > button, .stDownloadButton > button, .stFormSubmitButton > button {{
-    border-radius: 8px;
-    font-weight: 600;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
     letter-spacing: 0.02em;
-    border: 1px solid {border};
-    background: {surface};
-    color: {text};
+    border: 1.5px solid {btn_border} !important;
+    background: {btn_bg} !important;
+    color: {btn_text} !important;
     transition: all .15s ease;
 }}
-.stButton > button p, .stDownloadButton > button p, .stFormSubmitButton > button p {{
+/* 按鈕內層所有元素 (p/span/div) 一律繼承按鈕文字色 */
+[data-testid="stButton"] button *, [data-testid="stDownloadButton"] button *,
+[data-testid="stFormSubmitButton"] button *,
+.stButton > button *, .stDownloadButton > button *, .stFormSubmitButton > button * {{
     color: inherit !important;
 }}
+/* 主要按鈕 (雙屬性選擇器壓過上方通用規則) */
+[data-testid="stButton"] button[kind="primary"],
+[data-testid="stButton"] [data-testid="stBaseButton-primary"],
+[data-testid="stFormSubmitButton"] button[kind="primaryFormSubmit"],
+[data-testid="stFormSubmitButton"] [data-testid="stBaseButton-primaryFormSubmit"],
 .stButton > button[kind="primary"], .stFormSubmitButton > button[kind="primary"] {{
-    background: {primary};
-    border-color: {primary};
-    color: {primary_text};
+    background: {btn_primary_bg} !important;
+    border-color: {btn_primary_bg} !important;
+    color: {btn_primary_text} !important;
+    box-shadow: 0 1px 4px {shadow};
 }}
+[data-testid="stButton"] button[kind="primary"]:hover,
+[data-testid="stButton"] [data-testid="stBaseButton-primary"]:hover,
+[data-testid="stFormSubmitButton"] button[kind="primaryFormSubmit"]:hover,
 .stButton > button[kind="primary"]:hover {{
-    background: {primary_hover};
-    border-color: {primary_hover};
+    background: {btn_primary_hover} !important;
+    border-color: {btn_primary_hover} !important;
+    color: {btn_primary_text} !important;
 }}
-.stButton > button:hover {{
-    border-color: {primary};
-    color: {primary};
+/* 次要按鈕 hover：主色描邊 + 主色文字 */
+[data-testid="stButton"] button:hover, [data-testid="stDownloadButton"] button:hover,
+[data-testid="stFormSubmitButton"] button:hover,
+.stButton > button:hover, .stDownloadButton > button:hover {{
+    border-color: {primary} !important;
+    color: {primary} !important;
+}}
+[data-testid="stButton"] button:disabled {{
+    opacity: .45;
 }}
 
 /* ---------- 輸入元件 ---------- */
