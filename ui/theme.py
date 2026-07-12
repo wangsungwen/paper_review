@@ -162,6 +162,53 @@ h1, h2, h3, h4, h5, h6, p, li, label,
     opacity: .45;
 }}
 
+/* ---------- Popover(當前參數)、上傳(Browse files) 及其他 BaseButton 補漏 ---------- */
+/* 通用安全網：主畫面與側邊欄內所有 stBaseButton-* (popover 觸發鈕、uploader 按鈕...) */
+[data-testid="stAppViewContainer"] button[data-testid^="stBaseButton"],
+[data-testid="stSidebar"] button[data-testid^="stBaseButton"],
+[data-testid="stPopover"] button,
+[data-testid="stFileUploaderDropzone"] button,
+[data-testid="stFileUploader"] button {{
+    background: {btn_bg} !important;
+    color: {btn_text} !important;
+    border: 1.5px solid {btn_border} !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+}}
+[data-testid="stAppViewContainer"] button[data-testid^="stBaseButton"] *,
+[data-testid="stSidebar"] button[data-testid^="stBaseButton"] *,
+[data-testid="stPopover"] button *,
+[data-testid="stFileUploader"] button * {{
+    color: inherit !important;
+}}
+[data-testid="stAppViewContainer"] button[data-testid^="stBaseButton"]:hover,
+[data-testid="stSidebar"] button[data-testid^="stBaseButton"]:hover,
+[data-testid="stPopover"] button:hover,
+[data-testid="stFileUploader"] button:hover {{
+    border-color: {primary} !important;
+    color: {primary} !important;
+}}
+/* Popover 彈出面板本體 */
+[data-testid="stPopoverBody"] {{
+    background: {surface} !important;
+    color: {text} !important;
+    border: 1px solid {border} !important;
+    border-radius: 10px !important;
+}}
+[data-testid="stPopoverBody"] p, [data-testid="stPopoverBody"] label {{
+    color: {text} !important;
+}}
+/* 上傳區說明文字與已上傳檔名 */
+[data-testid="stFileUploaderDropzoneInstructions"],
+[data-testid="stFileUploaderDropzoneInstructions"] span,
+[data-testid="stFileUploaderDropzoneInstructions"] small {{
+    color: {text_muted} !important;
+}}
+[data-testid="stFileUploaderFileName"],
+[data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] * {{
+    color: {text} !important;
+}}
+
 /* ---------- 輸入元件 ---------- */
 .stTextInput input, .stNumberInput input, .stTextArea textarea {{
     border-radius: 8px !important;
