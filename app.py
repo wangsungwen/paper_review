@@ -151,6 +151,7 @@ with st.sidebar:
         '</div>',
         unsafe_allow_html=True,
     )
+    ui_theme.theme_toggle()
     st.header("工作區切換")
     
     entry_mode = st.radio(

@@ -116,3 +116,80 @@ D:\paper_review_system_multi\core\knowledge.py
 
 D:\paper_review_system_multi\config.example.json
 Code
+
+WEB UI 畫面編排字樣符號及字體配置，請幫我優化升級更專業
+
+Edited 14 files, updated tasks, created 3 files
+Now the stat cards and the detection heatmap container:
+
+Edited 2 files
+Adding the gitignore exception for the theme config, then verifying everything:
+
+Ran 4 commands, updated tasks, read a file
+UI 升級完成並已 commit（b670df3），24 個測試持續通過。這次改了什麼：
+
+字體排印：全站改用 Noto Sans TC（中文）＋ Inter（西文），程式碼與數字用 JetBrains Mono；標題採 Noto Serif TC 襯線體增添學術感；數字使用等寬數字對齊。
+
+配色系統：以學術深藍
+
+# 1F4E79 為主色，搭配 slate 灰階與充足留白，取代原本的預設紅色系；.streamlit/config.toml 同步設定全域佈景
+
+版面結構：頁首改為漸層深藍主視覺橫幅（標題＋副標）；「1. 論文資料 → 1.2 參考文獻 → 1.5 預處理 → 2. AI 偵測 → 3. 委員配置 → 4. 執行審查 → 5. 結果匯出」全部改為統一的編號徽章章節標頭，每節附一句功能說明，動線一目瞭然。
+
+符號整理：移除裝飾性 emoji（🎮📄🚀 等標題符號），改以步驟編號與階層表達專業感；側邊欄加上品牌標識區。
+
+元件細節：字數統計卡、AI 偵測熱力圖容器、評分 metric 卡片統一為圓角＋細邊框＋淺陰影的卡片語言；按鈕、輸入框、上傳區、表格同步圓角化；推論模式改為膠囊徽章顯示。
+
+所有樣式集中在 ui/theme.py，之後想調色或換字體只需改檔案開頭的 design tokens。執行 streamlit run app.py 即可看到新介面；若想再調整（例如改成深色模式或其他主色），告訴我即可。
+
+D:\paper_review_system_multi\ui\theme.py
+
+D:\paper_review_system_multi\.streamlit\config.toml
+
+WEB UI 增加背景深淺切換功能
+
+Thought process
+Adding a light/dark toggle. I'll refactor ui/theme.py to palette-driven CSS with a dark scheme, then wire a sidebar toggle:
+
+Updated tasks, created a file, edited a file
+The sync layer truncated the write again — rewriting the whole file via shell:
+
+Ran 2 commands, updated tasks
+深淺色切換已完成並 commit（480da56），測試全數通過。
+
+側邊欄品牌標識下方現在有「🌙 深色模式」開關，切換即時生效（該次瀏覽器會話內記住設定，符合系統原本的會話隔離原則）。實作上把 ui/theme.py 改成 palette 驅動：LIGHT／DARK 兩組 design tokens 套進同一份 CSS 模板，涵蓋背景、側邊欄、文字、輸入框、按鈕、下拉選單、卡片、熱力圖容器等所有元件。深色版採 slate 深藍底（
+
+# 0F172A）配提亮的學術藍，成功／警示色也調成深底可讀的版本，兩種模式下前一輪做的專業排版完全一致
+
+執行 streamlit run app.py 就能試切換。之後想微調任一模式的顏色，改 ui/theme.py 開頭的 LIGHT / DARK 字典即可。
+
+1.切換深色模式時，字樣要切換為"淺色模式"及月亮變成太陽
+2.深色模式時，按鍵字體顏色不明顯了，須併隨深淺背景改變明亮度Ran 2 commandsRan 2 commands兩個問題都已修正並 commit（7739623）：
+
+開關字樣與圖示：現在會隨模式切換——淺色時顯示「🌙 深色模式」，切到深色後變成「☀️ 淺色模式」。
+按鍵文字對比：找到了根本原因——全域文字顏色規則覆蓋了按鈕內層文字，導致主要按鈕在深色模式變成「淺灰字配淺藍底」。修法有二：強制按鈕內文字繼承按鈕本身的顏色，並新增 primary_text 色彩權杖——淺色模式為深藍底白字、深色模式為亮藍底深藍字，兩種背景下對比都清晰（章節編號徽章也同步套用）。
+
+重新整理頁面即可看到效果。
+
+按鍵及其字體顏色仍不明顯，請再優化深淺模式的最佳呈現
+
+Ran 2 commands
+深色主要按鈕對比 4.53:1 剛好壓線，再加強一點餘裕：
+
+Ran a command
+已重做按鈕配色並 commit（7f94ac9）。這次從兩個層面根治：
+
+選擇器層面（為什麼之前沒生效）：新版 Streamlit 的按鈕 DOM 結構改了（stBaseButton-primary 取代舊的 kind="primary"），舊選擇器根本沒套上。現在新舊兩代 DOM 都涵蓋，加上 !important 與內層元素強制繼承，樣式必定生效。
+
+配色層面：按鈕不再共用強調色，改用專屬 tokens，並以 WCAG AA 標準實測對比度——淺色模式主要按鈕白字深藍底 8.7:1、次要按鈕 14.7:1；深色模式主要按鈕白字飽和藍底 5.2:1、次要按鈕改為明顯較亮的板岩底配近白文字 10.8:1，邊框也加粗為 1.5px 亮灰，深底上輪廓清楚。
+
+請重新整理頁面確認。若某顆特定按鈕仍看不清楚，告訴我是哪一顆（或截圖給我），我可以針對該元件單獨調。
+
+深色模式時的"當前參數"及"UPLOAD"按鍵顏色沒有優化
+
+Ran a command
+已修正並 commit（60ddfd2）。
+
+這兩顆按鍵之前沒被涵蓋是因為它們不屬於一般按鈕元件——「當前參數」是 popover 觸發鈕、「Browse files」藏在檔案上傳器內部。這次除了個別處理，還加了一條通用安全網規則：主畫面與側邊欄內所有 Streamlit 底層按鈕（stBaseButton-*）一律套用高對比按鈕配色，之後任何新出現的次要按鈕都會自動跟上主題，不會再漏。
+
+同時補了三處深色模式的配套：「當前參數」點開後的彈出面板改為深色底、上傳區的「Drag and drop file here」說明文字、已上傳檔名也都跟隨配色。重新整理頁面即可確認。

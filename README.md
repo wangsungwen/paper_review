@@ -115,4 +115,27 @@ streamlit run app.py
 ```
 
 #### 【環境 C】Docker 容器化無痛部署 (無干擾推薦)
-如�
+如果您希望完全隔絕環境污染，可以直接使用 Docker 化架構一鍵啟動：
+
+```bash
+# 背景部署容器 (包含自動透通掛載 config 與 local_models)
+docker compose up -d
+```
+若要在 Docker 內啟用 NVIDIA GPU 加速，請先取消 `docker-compose.yml` 內 deploy 區塊的註解。
+
+### 3. 打包與發佈 (EXE 版)
+如果您希望將此系統作為無須安裝環境的可攜式軟體分發：
+
+```powershell
+python build_exe.py
+```
+執行完後，結果將輸出於 `dist/PaperReviewSystem/` 內。 **注意**：為避免執行檔體積過大，`local_models` 模型資料夾與裡面的 `.gguf` 並未被打包。請務必在發布前，手動將 `local_models` 資料夾複製並放置於 `PaperReviewSystem.exe` 同一層級！
+
+---
+
+## ⚠️ 常見問題
+- **隱私安全性**：畫面上輸入的所有 API 金鑰僅存在於您的瀏覽器視窗中，登出或重新整理即清除，後台管理員無法窺視。
+- **驅動與 CUDA Error**：若遇到 `no kernel image`，請至「⚙️ 參數設定」勾選「強制使用 CPU 進行 AI 偵測」。若啟動時遇到 `cudaGetDriverEntryPointByVersion` 錯誤，請更新實體主機的 NVIDIA 顯示卡驅動。
+
+---
+*本系統旨在透過多代理人協作與動態知識擴充，全面提升學術論文的審查效率與品質。*
