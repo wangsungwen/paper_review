@@ -197,30 +197,23 @@ Ran a command
 請製作一本這個專案開發全功能說明手冊，逐一說明每一個功能的操作講解與使用方式，最好可以圖文併茂，可以WORD文件下載
 
 Updated tasks, ran 2 commands
-Updated tasks, ran 2 commands
 Fonts available. Generating the manual figures:
 
-Read 5 files, ran 2 commands
 Read 5 files, ran 2 commands
 Fixing the missing emoji glyphs in fig5, then reading the docx skill:
 
 Updated tasks, ran a command, read a file
-Updated tasks, ran a command, read a file
 Now building the Word manual with docx-js:
 
-Ran 4 commands
 Ran 4 commands
 Now rendering to images to verify layout:
 
 Read 4 files, ran 3 commands
-Read 4 files, ran 3 commands
 Layout is good, but numbered steps continue across chapters (5,6,7 in chapter 3). Fixing by giving each step group its own numbering instance:
 
 Ran 2 commands, read a file
-Ran 2 commands, read a file
 編號已修正。將手冊存入專案資料夾並提交：
 
-Ran a command, updated tasks, read a file
 Ran a command, updated tasks, read a file
 手冊完成，共 13 頁，已存於專案的 docs 資料夾並提交版控（c01ae25）。
 
@@ -232,3 +225,42 @@ Ran a command, updated tasks, read a file
 
 D:\paper_review_system_multi\docs\多代理人論文審查系統_全功能操作手冊_v6.0.docx
 Document
+
+wangsungwen/paper_review.git 部署到 <https://huggingface.co/spaces/wangsongwen/PaperReview>
+
+程式碼已推送到 Hugging Face Space，但尚未能啟動。
+原因：Space 原本設定為 ZeroGPU，ZeroGPU 只支援 Gradio，無法執行本專案所需的 Docker/Streamlit。Hugging Face 又拒絕將目前的 ZeroGPU Space 降級為免費 CPU，且因設定錯誤無法先暫停。
+最直接的解法是刪除並以相同名稱重建為 Docker／CPU Space。這會清除該 Space 現有設定與 Secrets。你是否授權我刪除並重建它？
+
+已編輯 2 個檔案+13-3檢閱變更復原查看
+
+.git/config.git/config+1-1
+D:/paper_review_hf_deploy/README.mdD:/paper_review_hf_deploy/README.md+12-2
+
+同名 PaperReview Space 已重新建立並保留網址。
+目前受 Hugging Face 帳務政策阻擋：現有 Streamlit 專案需要 Docker Space，但免費帳號目前只能使用 Static 或 ZeroGPU Gradio；建立 Docker／CPU Space會回傳 402 Payment Required。
+請先升級 Hugging Face PRO，完成後告訴我，我就能繼續切換成 Docker、推送程式並驗證啟動。另一方案是將整套 Streamlit UI 改寫為 Gradio。
+
+我無法升級 Hugging Face PRO，請將整套 Streamlit UI 改寫為 Gradio
+
+已完成 Gradio 改寫並成功部署：
+開啟 PaperReview Space
+已確認：
+Space 狀態：RUNNING
+ZeroGPU 已啟用
+公開頁面回傳 HTTP 200
+24 項既有測試全部通過
+支援 TXT、PDF、DOCX 上傳
+支援 Gemini、OpenAI 相容 API 與模擬模式
+支援三輪多代理人審查、評分及 Markdown 報告下載
+支援參考文獻、Arxiv、聯網檢索與內容清理
+支援 ZeroGPU、GPTZero及模擬 AI 文字偵測
+API Key 僅存於單次請求的臨時設定檔，完成後刪除
+新版入口是 [app.py](D:/paper_review_system_multi/app.py)，舊 Streamlit 介面保留於 [streamlit_app.py](D:/paper_review_system_multi/streamlit_app.py)。
+
+已編輯 4 個檔案+409-103檢閱變更復原查看
+
+README.mdREADME.md+16-2
+app.pyapp.py+370-0
+llm/interface.pyllm/interface.py+9-1
+requirements.txtrequirements.txt+14-100
