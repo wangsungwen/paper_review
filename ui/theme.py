@@ -34,6 +34,7 @@ LIGHT = {
     "badge_bg": "#EAF1F8",
     "badge_text": "#1F4E79",
     "input_bg": "#FFFFFF",
+    "primary_text": "#FFFFFF",
 }
 
 DARK = {
@@ -58,6 +59,7 @@ DARK = {
     "badge_bg": "#1E3A5F",
     "badge_text": "#AECDE8",
     "input_bg": "#0F1B2E",
+    "primary_text": "#0F172A",
 }
 
 _CSS_TEMPLATE = """
@@ -110,10 +112,13 @@ h1, h2, h3, h4, h5, h6, p, li, label,
     color: {text};
     transition: all .15s ease;
 }}
+.stButton > button p, .stDownloadButton > button p, .stFormSubmitButton > button p {{
+    color: inherit !important;
+}}
 .stButton > button[kind="primary"], .stFormSubmitButton > button[kind="primary"] {{
     background: {primary};
     border-color: {primary};
-    color: {app_bg};
+    color: {primary_text};
 }}
 .stButton > button[kind="primary"]:hover {{
     background: {primary_hover};
@@ -215,7 +220,7 @@ hr {{
 .prs-section .prs-step {{
     flex: none;
     background: {primary};
-    color: {app_bg};
+    color: {primary_text};
     font-weight: 700;
     font-size: .85rem;
     border-radius: 6px;
@@ -302,9 +307,15 @@ def inject_theme(dark: bool = None):
 
 
 def theme_toggle():
-    """側邊欄的深／淺色切換開關 (放在 sidebar 區塊內呼叫)。"""
+    """側邊欄的深／淺色切換開關 (放在 sidebar 區塊內呼叫)。
+
+    字樣與圖示隨當前模式切換：淺色時顯示「🌙 深色模式」(切過去)，
+    深色時顯示「☀️ 淺色模式」(切回來)。
+    """
+    dark = bool(st.session_state.get("dark_mode", False))
+    label = "☀️ 淺色模式" if dark else "🌙 深色模式"
     st.toggle(
-        "🌙 深色模式",
+        label,
         key="dark_mode",
         help="切換介面深淺配色，設定僅保存於本次瀏覽器會話。",
     )
