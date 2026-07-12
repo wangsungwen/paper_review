@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Iterable
 
 import gradio as gr
+import requests
 
 try:
     import spaces
@@ -147,7 +148,18 @@ def _temporary_config(config: dict) -> str:
 
 def _reviewers_from_table(rows) -> list[ReviewerAgent]:
     reviewers = []
-    for row in rows or []:
+    # Gradio 6 returns a pandas.DataFrame.  Evaluating a DataFrame as a bool
+    # (``rows or []``) raises: "The truth value of a DataFrame is ambiguous".
+    if rows is None:
+        normalized_rows = []
+    elif hasattr(rows, "itertuples"):
+        normalized_rows = rows.fillna("").itertuples(index=False, name=None)
+    elif isinstance(rows, dict):
+        normalized_rows = zip(*rows.values()) if rows else []
+    else:
+        normalized_rows = rows
+
+    for row in normalized_rows:
         values = list(row) + ["", "", "", ""]
         name, expertise, focus, style = [str(value or "").strip() for value in values[:4]]
         if name:
@@ -155,6 +167,73 @@ def _reviewers_from_table(rows) -> list[ReviewerAgent]:
     if not reviewers:
         raise gr.Error("請至少設定一位審查委員。")
     return reviewers
+
+
+def _openai_models_url(api_url: str) -> str:
+    """Convert a chat-completions endpoint to its OpenAI-compatible models URL."""
+    url = (api_url or "https://api.openai.com/v1/chat/completions").strip().rstrip("/")
+    for suffix in ("/chat/completions", "/responses", "/completions"):
+        if url.endswith(suffix):
+            return url[: -len(suffix)] + "/models"
+    return url if url.endswith("/models") else url + "/models"
+
+
+def provider_defaults(provider: str):
+    if provider == "Gemini":
+        choices = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
+        return gr.Dropdown(choices=choices, value=choices[0], allow_custom_value=True), gr.Textbox(value="https://api.openai.com/v1/chat/completions", visible=False)
+    if provider == "OpenAI 相容 API":
+        choices = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"]
+        return gr.Dropdown(choices=choices, value=choices[0], allow_custom_value=True), gr.Textbox(value="https://api.openai.com/v1/chat/completions", visible=True)
+    return gr.Dropdown(choices=["mock"], value="mock", allow_custom_value=True), gr.Textbox(value="https://api.openai.com/v1/chat/completions", visible=False)
+
+
+def detect_available_models(provider: str, api_key: str, api_url: str):
+    """Validate the API key and populate the model dropdown."""
+    if provider == "模擬模式":
+        return gr.Dropdown(choices=["mock"], value="mock", allow_custom_value=True), "✅ 模擬模式不需要 API Key。"
+    if not (api_key or "").strip():
+        raise gr.Error("請先輸入 API Key。")
+
+    try:
+        if provider == "Gemini":
+            response = requests.get(
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                params={"key": api_key.strip(), "pageSize": 1000},
+                timeout=20,
+            )
+            response.raise_for_status()
+            models = []
+            for item in response.json().get("models", []):
+                methods = item.get("supportedGenerationMethods", [])
+                if "generateContent" in methods:
+                    models.append(item.get("name", "").removeprefix("models/"))
+        else:
+            response = requests.get(
+                _openai_models_url(api_url),
+                headers={"Authorization": f"Bearer {api_key.strip()}"},
+                timeout=20,
+            )
+            response.raise_for_status()
+            models = [str(item.get("id", "")).strip() for item in response.json().get("data", [])]
+
+        models = sorted({model for model in models if model}, key=str.lower)
+        if not models:
+            raise ValueError("API 回應成功，但沒有可用模型。您仍可手動輸入模型名稱。")
+        preferred = next((m for m in models if "flash" in m.lower()), models[0])
+        return (
+            gr.Dropdown(choices=models, value=preferred, allow_custom_value=True),
+            f"✅ API Key 驗證成功，共找到 {len(models)} 個可用模型。",
+        )
+    except requests.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.response.json().get("error", {}).get("message", "")
+        except Exception:
+            detail = exc.response.text[:300] if exc.response is not None else ""
+        raise gr.Error(f"模型偵測失敗（HTTP {exc.response.status_code}）：{detail or exc}") from exc
+    except Exception as exc:
+        raise gr.Error(f"模型偵測失敗：{exc}") from exc
 
 
 def _round_markdown(title: str, entries: dict) -> str:
@@ -283,9 +362,22 @@ with gr.Blocks(title=APP_TITLE) as demo:
     with gr.Accordion("⚙️ 推論與知識設定", open=True):
         with gr.Row():
             provider = gr.Radio(["Gemini", "OpenAI 相容 API", "模擬模式"], value="Gemini", label="推論服務")
-            model_name = gr.Textbox(value="gemini-2.5-flash", label="模型名稱")
+            model_name = gr.Dropdown(
+                choices=["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+                value="gemini-2.5-flash", allow_custom_value=True,
+                label="模型名稱（可從偵測結果選擇或自行輸入）",
+            )
         api_key = gr.Textbox(label="API Key", type="password", placeholder="不會寫入儲存庫或永久磁碟")
-        api_url = gr.Textbox(value="https://api.openai.com/v1/chat/completions", label="OpenAI 相容 API Endpoint")
+        with gr.Row():
+            detect_models_button = gr.Button("🔍 驗證 API Key 並偵測可用模型")
+            model_detection_status = gr.Markdown("輸入 API Key 後可自動取得模型清單。")
+        api_url = gr.Textbox(value="https://api.openai.com/v1/chat/completions", label="OpenAI 相容 API Endpoint", visible=False)
+        provider.change(provider_defaults, provider, [model_name, api_url])
+        detect_models_button.click(
+            detect_available_models,
+            [provider, api_key, api_url],
+            [model_name, model_detection_status],
+        )
         with gr.Row():
             enable_rag = gr.Checkbox(value=True, label="Arxiv 最新文獻")
             enable_web = gr.Checkbox(value=False, label="聯網搜尋")
@@ -338,7 +430,13 @@ with gr.Blocks(title=APP_TITLE) as demo:
             )
 
         with gr.Tab("🔍 AI 文字偵測"):
+            detector_file = gr.File(
+                label="上傳待偵測論文（TXT / PDF / DOCX）",
+                file_types=[".txt", ".pdf", ".docx"], type="filepath",
+            )
+            detector_file_status = gr.Markdown("可上傳論文，或直接在下方貼上文字。")
             detector_text = gr.Textbox(label="待分析文字", lines=16)
+            detector_file.change(parse_paper_file, detector_file, [detector_text, detector_file_status])
             with gr.Row():
                 detector_mode = gr.Radio(["ZeroGPU 模型", "GPTZero API", "模擬偵測"], value="模擬偵測", label="偵測方式")
                 detector_key = gr.Textbox(label="GPTZero API Key", type="password")
