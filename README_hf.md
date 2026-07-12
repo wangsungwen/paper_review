@@ -1,18 +1,14 @@
 ---
 title: PaperReview
-emoji: 🎓
-colorFrom: blue
+emoji: 👀
+colorFrom: pink
 colorTo: purple
-sdk: gradio
-sdk_version: 6.20.0
-python_version: "3.12"
-app_file: app.py
+sdk: docker
+app_port: 8501
 pinned: false
 ---
 
-# 多代理人論文審查系統 - Gradio / Hugging Face Spaces 版
-
-本版本已將網頁介面從 Streamlit 完整改寫為 Gradio，以支援 Hugging Face Gradio Spaces。舊版 Streamlit 入口保留於 `streamlit_app.py`。
+# 多代理人論文審查系統 - 使用說明 (v6.0 架構重構版)
 
 本系統是一個專業級的多代理人 AI 論文審查平台，已全面升級為 **網頁伺服器架構**。特別針對高階硬體 (如 NVIDIA RTX 5090 Blackwell) 進行深度優化，支援大規模併發連線、會話隔離隱私保護與全域模型快取，並**導入動態知識擴充機制以突破 AI 知識時間落差**。
 
