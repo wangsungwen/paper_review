@@ -28,3 +28,4 @@ build/
 *.zip
 .git_backup_pre_cleanup/
 .pytest_cache/
+*.bundle
