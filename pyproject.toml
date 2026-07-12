@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paper-review-system-multi"
+version = "6.0.0"
+description = "多代理人 AI 論文審查系統 (Multi-agent AI paper review platform)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# 核心相依 (最小可執行集合；完整鎖定版本見 requirements.txt)
+dependencies = [
+    "streamlit>=1.35",
+    "requests>=2.31",
+    "aiohttp>=3.9",
+    "pypdf>=4.0",
+    "python-docx>=1.1",
+    "pandas>=2.2",
+    "scikit-learn>=1.4",
+    "altair>=5.0",
+]
+
+[project.optional-dependencies]
+# AI 寫作偵測 (Hugging Face 神經網路模型)
+detector = [
+    "torch>=2.6",
+    "transformers>=4.40",
+    "sentencepiece",
+    "tokenizers",
+    "safetensors",
+]
+# 本地 GGUF 推論 (需要編譯環境；GPU 版請參考 README 的 CMAKE_ARGS 說明)
+local = [
+    "llama-cpp-python>=0.3",
+    "huggingface_hub",
+]
+# 打包 EXE
+build = [
+    "pyinstaller>=6.0",
+]
+# 開發與測試
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools]
+packages = ["core", "llm", "models", "services"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

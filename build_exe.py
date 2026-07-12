@@ -4,12 +4,14 @@ import os
 
 # 定義要包含的資料路徑
 # 格式: (原始路徑, 打包後的相對路徑)
+# 注意：config.json (含 API 金鑰) 絕不打包進執行檔！
+# 執行檔啟動時會在 exe 旁自動生成無金鑰的預設 config.json。
 assets = [
     ("app.py", "."),
-    ("config.json", "."),
     ("core", "core"),
     ("llm", "llm"),
     ("models", "models"),
+    ("services", "services"),
 ]
 
 # 組合 --add-data 參數

@@ -1,51 +1,60 @@
 # llm/interface.py
 
+import asyncio
 import json
 import os
-import asyncio
-import requests
-import time
-import sys
-
-import os
-
-# GPU 探測與 Llama 崩潰迴避機制 (針對 Blackwell)
-import os
-import sys
 import subprocess
+import sys
+import time
 
-_has_blackwell = False
-try:
-    if os.name == 'nt':
-        # Native WMI check mapped via Powershell prevents CUDA runtime singleton initialization locking the device prematurely
-        _res = subprocess.run(
-            ['powershell', '-NoProfile', '-Command', 'Get-CimInstance -ClassName Win32_VideoController | Select-Object -ExpandProperty Name'], 
-            capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW
-        )
-        if _res.returncode == 0:
-            _gpu_info = _res.stdout.strip().lower()
-            if "5090" in _gpu_info or "5080" in _gpu_info or "5070" in _gpu_info or "blackwell" in _gpu_info:
-                _has_blackwell = True
-    elif os.name == 'posix':
-        _res = subprocess.run(
-            ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'], 
-            capture_output=True, text=True
-        )
-        if _res.returncode == 0:
-            _gpu_info = _res.stdout.strip().lower()
-            if "5090" in _gpu_info or "5080" in _gpu_info or "5070" in _gpu_info or "blackwell" in _gpu_info:
-                _has_blackwell = True
-except Exception:
-    pass
+import requests
 
-# FIXME(User): 暫時關掉「防閃退 CPU 模式」，以測試替換官方編譯 DLL 後的 5090 效能
-_has_blackwell = False
+
+def _detect_blackwell() -> bool:
+    """偵測是否為 NVIDIA Blackwell (50 系) 顯卡。"""
+    try:
+        if os.name == "nt":
+            # 透過 PowerShell WMI 查詢，避免提前初始化 CUDA runtime 鎖住裝置
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance -ClassName Win32_VideoController | Select-Object -ExpandProperty Name"],
+                capture_output=True, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        else:
+            res = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True, text=True,
+            )
+        if res.returncode == 0:
+            gpu_info = res.stdout.strip().lower()
+            return any(k in gpu_info for k in ("5090", "5080", "5070", "blackwell"))
+    except Exception:
+        pass
+    return False
+
+
+def _blackwell_force_cpu_enabled() -> bool:
+    """由 config.json 的 local.force_cpu_on_blackwell 控制防閃退 CPU 模式。
+
+    (取代舊版寫死在程式碼中的 `_has_blackwell = False` 覆寫；
+    換上相容的 llama-cpp 編譯版後，將設定保持 false 即可全速使用 GPU。)
+    """
+    try:
+        with open("config.json", "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        return bool(cfg.get("local", {}).get("force_cpu_on_blackwell", False))
+    except Exception:
+        return False
+
+
+_has_blackwell = _detect_blackwell() and _blackwell_force_cpu_enabled()
 
 original_cuda_val = os.environ.get("CUDA_VISIBLE_DEVICES")
 if _has_blackwell:
     # 提前在 Llama 模組載入前關閉 GPU
     os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-    
+
 try:
     from llama_cpp import Llama
     HAS_LLAMA_CPP = True
@@ -145,6 +154,24 @@ class LLMInterface:
                 return json.load(f)
         except Exception:
             return {"llm_mode": "mock"}
+
+    def get_input_token_budget(self) -> int:
+        """回傳目前引擎大約可用的「輸入」token 數，供 orchestrator 動態配置論文長度。"""
+        if self.mode == "local":
+            local_cfg = self.config.get("local", {})
+            n_ctx = int(local_cfg.get("n_ctx", 4096))
+            max_out = int(local_cfg.get("max_tokens", 1024))
+            return max(n_ctx - max_out, 2048)
+        if self.mode == "ollama":
+            # Ollama 預設 context 常為 8k；保守估計
+            return 8192
+        if self.mode == "cloud":
+            provider = self.config.get("cloud", {}).get("provider", "openai")
+            # Gemini 支援極長上下文；其他 OpenAI 相容服務多為 128k
+            return 200000 if provider == "gemini" else 100000
+        if self.mode == "gemini_native":
+            return 200000
+        return 8192  # mock 或未知模式
 
     @property
     def hardware_info(self) -> str:
@@ -327,121 +354,13 @@ class LLMInterface:
             }
         }
 
-        import time
-
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=60)
-                
-                # 處理 429 (Rate Limit) 或 503 (Service Unavailable / Overloaded) 錯誤
-                if response.status_code in [429, 503]:
-                    import random
-                    # 預設等待時間 (含退避和隨機抖動)
-                    base_wait = (2 ** attempt) * 5 + random.uniform(0, 1)
-                    wait_time = base_wait
-                    
-                    # 嘗試從回應中取得建議的等待時間
-                    try:
-                        response_data = response.json()
-                        error_data = response_data.get("error", {})
-                        retry_info = error_data.get("details", [])
-                        
-                        for detail in retry_info:
-                            if detail.get("@type") == "type.googleapis.com/google.rpc.RetryInfo":
-                                retry_delay_str = detail.get("retryDelay", "5s")
-                                # 處理如 "29.723877525s" 的字串
-                                wait_time = float(retry_delay_str.rstrip('s'))
-                                # 如果 API 建議的等待時間太短 (例如 0s)，則強制使用基本退避時間
-                                if wait_time < 2:
-                                    wait_time = base_wait
-                                break
-                        
-                        # 如果是 RESOURCE_EXHAUSTED 且 limit: 0，可能是每日配額已完
-                        if error_data.get("status") == "RESOURCE_EXHAUSTED":
-                            error_msg = error_data.get("message", "")
-                            # 💡 只有在沒有提供 retryDelay (非暫時性的 RPM/TPM 限制) 且真的寫死限制為 0 時，才視為每日額度耗盡
-                            has_retry_delay = any(detail.get("@type") == "type.googleapis.com/google.rpc.RetryInfo" for detail in retry_info)
-                            if "limit: 0" in error_msg and not has_retry_delay:
-                                return f"【Gemini 額度耗盡】：您的每日 API 配額已用完。請更換 API Key 或明日再試。\n詳細訊息：{error_msg}"
-                    except:
-                        pass
-                    
-                    if attempt < max_retries - 1:
-                        status_name = "速率限制 (429)" if response.status_code == 429 else "伺服器忙碌 (503)"
-                        print(f"Gemini {status_name}，等待 {wait_time:.2f} 秒後進行第 {attempt+2} 次重試...")
-                        time.sleep(wait_time)
-                        continue
-                
-                if response.status_code != 200:
-                    # 嘗試第二次機會：如果是 404，可能是 v1 不支援該模型，嘗試切換回 v1beta
-                    if response.status_code == 404:
-                        url_beta = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-                        response = requests.post(url_beta, headers=headers, json=payload, timeout=60)
-                        if response.status_code != 200:
-                            return f"【Gemini API 錯誤】：找不到模型或 API 版本不支援。請確認模型名稱 '{model_name}' 是否正確。({response.status_code})"
-                    else:
-                        return f"【Gemini API 錯誤】：{response.status_code} - {response.text}"
-                
-                data = response.json()
-                if 'candidates' not in data or not data['candidates']:
-                    return f"【Gemini 沒給出回應】：{str(data)}"
-                    
-                return data['candidates'][0]['content']['parts'][0]['text'].strip()
-                
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    time.sleep(2)
-                    continue
-                return f"【連線錯誤】：{str(e)}"
-        
-        return "【Gemini 錯誤】：已達最大重試次數，仍受速率限制。"
-    def list_models(self, api_key: str = None) -> str:
-        """ 嘗試列出該 API Key 可用的所有模型，用於除錯 """
-        if not api_key:
-            cloud_config = self.config.get("cloud", {})
-            api_key = cloud_config.get("api_key", "").strip()
-            
-        if not api_key or api_key == "YOUR_NEW_GEMINI_API_KEY":
-            return "錯誤：未設定有效 API Key。"
-            
-        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-        try:
-            response = requests.get(url, timeout=30)
-            if response.status_code == 200:
-                data = response.json()
-                models = [m.get("name", "").replace("models/", "") for m in data.get("models", [])]
-                # 過濾掉只支援嵌入或調整的模型，保留支援 generateContent 的
-                # 這裡簡單列出所有
-                return "、".join(models) if models else "找不到任何模型。"
-            else:
-                return f"無法取得模型清單 ({response.status_code}): {response.text}"
-        except Exception as e:
-            return f"連線失敗: {str(e)}"
-
-    def _generate_cloud_sync(self, api_key: str, model_name: str, api_url: str, system_prompt: str, user_prompt: str) -> str:
-        url = api_url
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
-        payload = {
-            "model": model_name,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "temperature": 0.7
-        }
-
-        # 增加重試次數與等待時間，以應對嚴格的 TPM 限制
         max_retries = 5
         for attempt in range(max_retries):
             try:
                 response = requests.post(url, headers=headers, json=payload, timeout=60)
                 if response.status_code == 429:
                     # 隨著重試次數增加，等待時間大幅拉長 (指數退避)
-                    wait_time = (attempt + 1) * 20 
+                    wait_time = (attempt + 1) * 20
                     print(f"收到 429 (TPM 限制)，正在等待 {wait_time} 秒後重試...")
                     time.sleep(wait_time)
                     continue

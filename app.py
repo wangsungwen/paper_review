@@ -4,18 +4,7 @@ import asyncio
 import json
 import os
 import sys
-import re
-import tempfile
 import copy
-import subprocess
-import platform
-import urllib.request
-import requests
-from io import BytesIO
-
-# 文字解析套件
-import pypdf
-import docx
 
 # -----------------------------------------------------------
 # 處理 Tkinter (雲端環境不支援時的防呆機制)
@@ -44,10 +33,16 @@ from models.reviewer import ReviewerAgent
 from llm.interface import LLMInterface
 from core.orchestrator import PaperReviewOrchestrator
 from core.ai_detector import AIDetector
+from services import config_service, ollama_service
+from services.file_service import (
+    check_model_exists,
+    extract_text_from_file,
+    apply_text_filters,
+)
 
 
 # ===========================================================
-# 工具函式區塊
+# 工具函式區塊 (僅保留與 UI 直接相關者，其餘已抽至 services/)
 # ===========================================================
 
 def select_file(current_path=""):
@@ -69,138 +64,27 @@ def select_file(current_path=""):
     except Exception:
         return None
 
-def resource_path(relative_path):
-    """ 取得相對於執行路徑的絕對路徑 (支援 PyInstaller 打包環境) """
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
-
-def check_model_exists(path):
-    """ 檢查本地模型路徑是否有效 (含相對路徑轉換) """
-    if not path: 
-        return False
-    if os.path.exists(path): 
-        return True
-    if os.path.exists(resource_path(path)): 
-        return True
-    return False
-
-def extract_text_from_file(uploaded_file):
-    """ 根據檔案副檔名提取文字內容 """
-    file_extension = uploaded_file.name.split('.')[-1].lower()
-    
-    # 確保檔案指標在起始位置，防止二次讀取變為空
-    uploaded_file.seek(0)
-    
-    raw_text = ""
-    try:
-        if file_extension == "txt":
-            raw_text = uploaded_file.getvalue().decode("utf-8", errors="ignore")
-            
-        elif file_extension == "pdf":
-            pdf_reader = pypdf.PdfReader(BytesIO(uploaded_file.read()))
-            text_list = []
-            for page in pdf_reader.pages:
-                content = page.extract_text()
-                if content:
-                    text_list.append(content)
-            raw_text = "\n".join(text_list)
-            
-        elif file_extension == "docx":
-            try:
-                doc = docx.Document(BytesIO(uploaded_file.read()))
-                raw_text = "\n".join([para.text for para in doc.paragraphs])
-            except Exception as e:
-                # 專門處理 docx 結構錯誤
-                if "no relationship of type" in str(e):
-                    raise ValueError("該 Word 檔案結構不完整。請嘗試在 Word 中「另存新檔」為標準 .docx 格式後再次上傳。")
-                raise e
-                
-        # 💡 核心防呆：強制過濾掉任何無法被 UTF-8 正常編碼的 Surrogate 或非法位元組，防止 Streamlit Websocket 傳輸時 Protobuf 崩潰
-        if isinstance(raw_text, str):
-            raw_text = raw_text.encode('utf-8', errors='ignore').decode('utf-8')
-        return raw_text
-        
-    except Exception as e:
-        raise Exception(f"解析 {file_extension.upper()} 失敗：{str(e)}")
-
 def get_temp_user_config_path(user_conf):
     """ 為線上使用者生成臨時設定檔路徑，保護伺服器實體 config.json 不被污染 """
-    if "config_temp_path" not in st.session_state:
-        fd, path = tempfile.mkstemp(prefix="user_config_", suffix=".json")
-        os.close(fd)
-        st.session_state.config_temp_path = path
-        
-    with open(st.session_state.config_temp_path, 'w', encoding='utf-8') as f:
-        json.dump(user_conf, f, indent=4, ensure_ascii=False)
-        
+    st.session_state.config_temp_path = config_service.write_temp_user_config(
+        user_conf, st.session_state.get("config_temp_path")
+    )
     return st.session_state.config_temp_path
 
 
 # ===========================================================
-# 系統設定檔管理初始化
+# 系統設定檔管理初始化 (詳見 services/config_service.py)
 # ===========================================================
 
 st.set_page_config(page_title="多代理人論文審查系統", page_icon="🎓", layout="wide")
 
-# 配置文件路徑處理 (確保打包後設定可持久化)
-config_name = "config.json"
-if getattr(sys, 'frozen', False):
-    # 如果是打包後的執行檔，將設定檔放在 exe 旁邊
-    base_dir = os.path.dirname(sys.executable)
-    config_path = os.path.join(base_dir, config_name)
-else:
-    # 開發模式下使用當前目錄
-    config_path = os.path.abspath(config_name)
-
-if not os.path.exists(config_path):
-    default_config = {
-        "llm_mode": "mock",
-        "cloud": {
-            "provider": "openai",
-            "api_key": "", 
-            "model_name": "gpt-4o", 
-            "api_url": "[https://api.openai.com/v1/chat/completions](https://api.openai.com/v1/chat/completions)"
-        },
-        "gemini_native": {
-            "api_key": "", 
-            "model_name": "gemini-1.5-flash"
-        },
-        "local": {
-            "model_path": "./local_models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf", 
-            "n_ctx": 4096, 
-            "max_tokens": 1024, 
-            "n_gpu_layers": -1
-        },
-        "ollama": {
-            "model_name": "llama3.1", 
-            "base_url": "http://localhost:11434"
-        },
-        "ai_detector": {
-            "api_key": "", 
-            "api_url": "[https://api.gptzero.me/v2/predict/text](https://api.gptzero.me/v2/predict/text)", 
-            "mode": "hf_model",
-            "force_cpu": False
-        },
-        # 💡 新增：知識更新策略預設值
-        "knowledge_update": {
-            "enable_rag": False,
-            "enable_web_search": False,
-            "enable_reference_upload": False
-        }
-    }
-    with open(config_path, 'w', encoding='utf-8') as f:
-        json.dump(default_config, f, indent=4)
+config_path = config_service.ensure_config_exists()
 
 def load_global_config():
-    with open(config_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    return config_service.load_global_config(config_path)
 
 def save_global_config(config):
-    with open(config_path, 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=4, ensure_ascii=False)
+    config_service.save_global_config(config, config_path)
 
 
 # ===========================================================
@@ -294,13 +178,8 @@ with st.sidebar:
             ollama_base_url = st.session_state.user_config.get("ollama", {}).get("base_url", "http://localhost:11434")
             try:
                 # 取得本地 Ollama 的可用模型
-                r = requests.get(f"{ollama_base_url}/api/tags", timeout=2)
-                r.raise_for_status()
+                local_models = ollama_service.list_local_models(ollama_base_url)
                 st.success("✅ Ollama 伺服器連線正常，可開始推論！")
-                
-                # 自動解析可用模型清單
-                ollama_data = r.json()
-                local_models = [m["name"] for m in ollama_data.get("models", [])]
                 if not local_models:
                     local_models = ["llama3.1"]
                 
@@ -323,7 +202,7 @@ with st.sidebar:
                 )
                 st.session_state.user_config.setdefault("ollama", {})["model_name"] = selected_ollama_model
                 
-            except requests.exceptions.RequestException:
+            except Exception:
                 st.error("⚠️ 伺服器端的 Ollama 服務似乎未啟動。請通知管理員。")
                 
         else:
@@ -446,48 +325,23 @@ with st.sidebar:
                 # ===============================================
                 if active_config.get("llm_mode") == "ollama":
                     ollama_base_url = active_config.get("ollama", {}).get("base_url", "http://localhost:11434")
-                    try:
-                        requests.get(f"{ollama_base_url}/api/tags", timeout=1)
-                    except requests.exceptions.RequestException:
+                    if not ollama_service.is_running(ollama_base_url, timeout=1):
                         st.error("⚠️ 偵測不到 Ollama 服務正在執行。")
                         st.markdown("請確保您已安裝並啟動 Ollama。若尚未安裝：")
                         st.markdown("1. 前往 [Ollama 官網](https://ollama.com/) 下載。")
                         st.markdown("2. 或點擊下方按鈕自動下載並啟動安裝程式。")
-                        
+
                         if st.button("🚀 自動下載並啟動 Ollama 安裝"):
                             with st.spinner("正在下載 Ollama 安裝檔，檔案較大請耐心稍候... (下載完成後將自動啟動安裝)"):
-                                try:
-                                    if sys.platform != "win32":
-                                        st.info("偵測為非 Windows 環境，正在執行官方自動安裝腳本... (可能需要 sudo 權限)")
-                                        print("\n[Ollama 輔助程式] 開始執行 Linux/macOS 安裝腳本...", flush=True)
-                                        res = subprocess.run("curl -fsSL [https://ollama.com/install.sh](https://ollama.com/install.sh) | sh", shell=True, capture_output=True, text=True)
-                                        if res.returncode == 0:
-                                            st.success("Ollama 安裝完成！建議您透過終端機執行 `ollama serve` 來確保背景服務活著。")
-                                            print("[Ollama 輔助程式] 安裝腳本執行成功！", flush=True)
-                                        else:
-                                            st.error(f"安裝腳本執行失敗，請手動在終端機執行: curl -fsSL [https://ollama.com/install.sh](https://ollama.com/install.sh) | sh\n\n{res.stderr}")
-                                    else:
-                                        setup_path = os.path.abspath("OllamaSetup.exe")
-                                        url = "[https://ollama.com/download/OllamaSetup.exe](https://ollama.com/download/OllamaSetup.exe)"
-                                        
-                                        print(f"\n[Ollama 輔助程式] 開始從 {url} 下載...", flush=True)
-                                        
-                                        def report_progress(block_num, block_size, total_size):
-                                            if total_size > 0:
-                                                percent = min(100, block_num * block_size * 100 / total_size)
-                                                sys.stdout.write(f"\r[Ollama 輔助程式] 下載進度：{percent:.1f}%")
-                                                sys.stdout.flush()
-                                        
-                                        urllib.request.urlretrieve(url, setup_path, reporthook=report_progress)
-                                        print(f"\n[Ollama 輔助程式] 下載完成！儲存於 {setup_path}", flush=True)
-                                        print("[Ollama 輔助程式] 準備啟動安裝程式...", flush=True)
-                                        
-                                        st.success("下載完成！正在為您啟動安裝程式...請注意快顯視窗")
-                                        subprocess.Popen([setup_path])
-                                        print("[Ollama 輔助程式] 安裝程式啟動指令已送出。\n", flush=True)
-                                except Exception as e:
-                                    st.error(f"自動下載或啟動失敗：{e}")
-                                    print(f"\n[Ollama 輔助程式] 發生錯誤：{e}\n", flush=True)
+                                def _report(percent):
+                                    sys.stdout.write(f"\r[Ollama 輔助程式] 下載進度：{percent:.1f}%")
+                                    sys.stdout.flush()
+
+                                ok, msg = ollama_service.install(progress_callback=_report)
+                                if ok:
+                                    st.success(msg)
+                                else:
+                                    st.error(msg)
         else:
             st.warning("⚠️ 此區塊僅限管理員存取。請輸入正確密碼。")
             # 移除 st.stop() 避免主畫面變空白
@@ -535,14 +389,14 @@ if entry_mode == "⚙️ 管理員 (參數設定)":
 
         if selected_provider_type == "OpenAI-Compatible":
             openai_providers = {
-                "OpenAI": "[https://api.openai.com/v1/chat/completions](https://api.openai.com/v1/chat/completions)",
-                "DeepSeek": "[https://api.deepseek.com/v1/chat/completions](https://api.deepseek.com/v1/chat/completions)",
-                "Groq": "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)",
-                "OpenRouter": "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)",
+                "OpenAI": "https://api.openai.com/v1/chat/completions",
+                "DeepSeek": "https://api.deepseek.com/v1/chat/completions",
+                "Groq": "https://api.groq.com/openai/v1/chat/completions",
+                "OpenRouter": "https://openrouter.ai/api/v1/chat/completions",
                 "Custom": ""
             }
-            
-            current_api_url = active_config["cloud"].get("api_url", "[https://api.openai.com/v1/chat/completions](https://api.openai.com/v1/chat/completions)")
+
+            current_api_url = active_config["cloud"].get("api_url", "https://api.openai.com/v1/chat/completions")
             provider_key = "Custom"
             for k, v in openai_providers.items():
                 if v == current_api_url and k != "Custom":
@@ -643,8 +497,8 @@ if entry_mode == "⚙️ 管理員 (參數設定)":
                 type="default" if detector_api_show else "password"
             )
             active_config["ai_detector"]["api_url"] = st.text_input(
-                "GPTZero API Endpoint", 
-                value=active_config["ai_detector"].get("api_url", "[https://api.gptzero.me/v2/predict/text](https://api.gptzero.me/v2/predict/text)")
+                "GPTZero API Endpoint",
+                value=active_config["ai_detector"].get("api_url", "https://api.gptzero.me/v2/predict/text")
             )
             
         elif active_config["ai_detector"]["mode"] == "local":
@@ -714,9 +568,17 @@ if entry_mode == "⚙️ 管理員 (參數設定)":
             value=active_config["knowledge_update"].get("enable_rag", False)
         )
         active_config["knowledge_update"]["enable_web_search"] = st.checkbox(
-            "🌍 策略二：啟用代理人聯網搜尋 (自動搜尋最新網頁資訊)", 
+            "🌍 策略二：啟用代理人聯網搜尋 (自動搜尋最新網頁資訊)",
             value=active_config["knowledge_update"].get("enable_web_search", False)
         )
+        if active_config["knowledge_update"]["enable_web_search"]:
+            tavily_show = st.checkbox("顯示 Tavily Key", key="show_tavily_api")
+            active_config["knowledge_update"]["tavily_api_key"] = st.text_input(
+                "Tavily Search API Key (選填；留空則自動退回 Wikipedia 輕量搜尋)",
+                value=active_config["knowledge_update"].get("tavily_api_key", ""),
+                type="default" if tavily_show else "password",
+                autocomplete="new-password"
+            )
         active_config["knowledge_update"]["enable_reference_upload"] = st.checkbox(
             "📤 策略三：啟用動態參考文獻上傳 (由使用者手動補充)", 
             value=active_config["knowledge_update"].get("enable_reference_upload", False)
@@ -925,20 +787,13 @@ else:
                     st.session_state.manual_exclusions.pop(i)
                     st.rerun()
 
-    # --- 執行文字過濾邏輯 ---
-    if filtered_text:
-        for me in st.session_state.manual_exclusions:
-            filtered_text = filtered_text.replace(me, "")
-            
-        if exclude_quotes:
-            filtered_text = re.sub(r'["“”「」](.*?)["“”「」]', '', filtered_text)
-            
-        if exclusion_keywords.strip():
-            keywords = [k.strip() for k in exclusion_keywords.split('\n') if k.strip()]
-            for kw in keywords:
-                idx = filtered_text.lower().find(kw.lower())
-                if idx != -1:
-                    filtered_text = filtered_text[:idx] 
+    # --- 執行文字過濾邏輯 (詳見 services/file_service.py) ---
+    filtered_text = apply_text_filters(
+        filtered_text,
+        manual_exclusions=st.session_state.manual_exclusions,
+        exclude_quotes=exclude_quotes,
+        exclusion_keywords=exclusion_keywords,
+    )
 
     compared_words = len(filtered_text)
     excluded_words = total_words - compared_words
