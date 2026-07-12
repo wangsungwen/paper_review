@@ -264,3 +264,152 @@ README.mdREADME.md+16-2
 app.pyapp.py+370-0
 llm/interface.pyllm/interface.py+9-1
 requirements.txtrequirements.txt+14-100
+
+Gradio 改寫版本UI執行後出現錯誤
+另外，切換至 "AI文字偵測"，沒有可以上傳論文的選項
+輸入推論服務方的API KEY，需要增加偵測可用模型選單
+
+原本的streamlit版本不要更改到，需要保留
+
+已修正並重新部署至 PaperReview Space。
+本次修正：
+解決 pandas DataFrame 的 truth value is ambiguous 審查錯誤。
+AI 文字偵測頁新增 TXT、PDF、DOCX 上傳。
+上傳後會自動解析並填入待分析文字。
+新增「驗證 API Key 並偵測可用模型」。
+Gemini 會取得支援 generateContent 的模型。
+OpenAI 相容服務會查詢對應的 /models。
+模型以下拉選單呈現，也允許手動輸入名稱。
+切換推論服務時會自動調整預設模型與 Endpoint 欄位。
+驗證結果：
+DataFrame 審查修正測試通過。
+完整三輪模擬審查通過。
+模型偵測及檔案上傳測試通過。
+Space 狀態為 RUNNING。
+線上頁面回傳 HTTP 200。
+部署版本：2a76d64
+原 Streamlit 版本完全未修改；這次只更新 Hugging Face Space 的 Gradio app.py。
+
+已編輯 app.py+101-3檢閱變更復原查看
+
+Claude is responding
+
+Ran 2 commands
+Ran 2 commands
+兩個問題都已修正並 commit（7739623）：
+
+開關字樣與圖示：現在會隨模式切換——淺色時顯示「🌙 深色模式」，切到深色後變成「☀️ 淺色模式」。
+按鍵文字對比：找到了根本原因——全域文字顏色規則覆蓋了按鈕內層文字，導致主要按鈕在深色模式變成「淺灰字配淺藍底」。修法有二：強制按鈕內文字繼承按鈕本身的顏色，並新增 primary_text 色彩權杖——淺色模式為深藍底白字、深色模式為亮藍底深藍字，兩種背景下對比都清晰（章節編號徽章也同步套用）。
+重新整理頁面即可看到效果。
+
+按鍵及其字體顏色仍不明顯，請再優化深淺模式的最佳呈現
+
+Ran 2 commands
+Ran 2 commands
+深色主要按鈕對比 4.53:1 剛好壓線，再加強一點餘裕：
+
+Ran a command
+Ran a command
+已重做按鈕配色並 commit（7f94ac9）。這次從兩個層面根治：
+
+選擇器層面（為什麼之前沒生效）：新版 Streamlit 的按鈕 DOM 結構改了（stBaseButton-primary 取代舊的 kind="primary"），舊選擇器根本沒套上。現在新舊兩代 DOM 都涵蓋，加上 !important 與內層元素強制繼承，樣式必定生效。
+
+配色層面：按鈕不再共用強調色，改用專屬 tokens，並以 WCAG AA 標準實測對比度——淺色模式主要按鈕白字深藍底 8.7:1、次要按鈕 14.7:1；深色模式主要按鈕白字飽和藍底 5.2:1、次要按鈕改為明顯較亮的板岩底配近白文字 10.8:1，邊框也加粗為 1.5px 亮灰，深底上輪廓清楚。
+
+請重新整理頁面確認。若某顆特定按鈕仍看不清楚，告訴我是哪一顆（或截圖給我），我可以針對該元件單獨調。
+
+深色模式時的"當前參數"及"UPLOAD"按鍵顏色沒有優化
+
+Ran a command
+Ran a command
+已修正並 commit（60ddfd2）。
+
+這兩顆按鍵之前沒被涵蓋是因為它們不屬於一般按鈕元件——「當前參數」是 popover 觸發鈕、「Browse files」藏在檔案上傳器內部。這次除了個別處理，還加了一條通用安全網規則：主畫面與側邊欄內所有 Streamlit 底層按鈕（stBaseButton-*）一律套用高對比按鈕配色，之後任何新出現的次要按鈕都會自動跟上主題，不會再漏。
+
+同時補了三處深色模式的配套：「當前參數」點開後的彈出面板改為深色底、上傳區的「Drag and drop file here」說明文字、已上傳檔名也都跟隨配色。重新整理頁面即可確認。
+
+請製作一本這個專案開發全功能說明手冊，逐一說明每一個功能的操作講解與使用方式，最好可以圖文併茂，可以WORD文件下載
+
+Updated tasks, ran 2 commands
+Updated tasks, ran 2 commands
+Fonts available. Generating the manual figures:
+
+Read 5 files, ran 2 commands
+Read 5 files, ran 2 commands
+Fixing the missing emoji glyphs in fig5, then reading the docx skill:
+
+Updated tasks, ran a command, read a file
+Updated tasks, ran a command, read a file
+Now building the Word manual with docx-js:
+
+Ran 4 commands
+Ran 4 commands
+Now rendering to images to verify layout:
+
+Read 4 files, ran 3 commands
+Read 4 files, ran 3 commands
+Layout is good, but numbered steps continue across chapters (5,6,7 in chapter 3). Fixing by giving each step group its own numbering instance:
+
+Ran 2 commands, read a file
+Ran 2 commands, read a file
+編號已修正。將手冊存入專案資料夾並提交：
+
+Ran a command, updated tasks, read a file
+Ran a command, updated tasks, read a file
+手冊完成，共 13 頁，已存於專案的 docs 資料夾並提交版控（c01ae25）。
+
+內容涵蓋九大章：系統簡介與架構、四種安裝部署方式（Windows／Linux／Docker／EXE）、初始設定與金鑰管理（含環境變數對照表）、介面導覽與三種工作區、五種推論引擎設定、動態知識擴充三策略，以及最核心的「步驟 1 到步驟 5 完整審查流程」逐步操作教學，最後附疑難排解 FAQ 與專案結構附錄。
+
+圖文部分配有六張依系統實際配色繪製的插圖：系統架構圖、三輪審查流程圖、主畫面操作動線、知識擴充策略圖、深淺模式對照、推論引擎總覽。操作步驟用編號清單、對照資訊用深藍表頭表格、注意事項用引言框呈現，開啟後目錄會提示更新欄位（點「是」即自動生成頁碼）。
+
+一點說明：插圖是示意圖而非實際畫面截圖——若你希望改用真實操作截圖，可以在本機開啟系統後截幾張圖給我，我可以直接替換進手冊。
+
+D:\paper_review_system_multi\docs\多代理人論文審查系統_全功能操作手冊_v6.0.docx
+Document
+雲端API選用 OPENAI 執行多代理人學術審查結果
+====
+
+AttributeError: 'LLMInterface' object has no attribute '_generate_cloud_sync'
+File "D:\paper_review_system_multi\streamlit_app.py", line 1030, in <module>
+    asyncio.run(run_review_process())
+File "c:\Users\wangs\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+File "c:\Users\wangs\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "c:\Users\wangs\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 654, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+File "D:\paper_review_system_multi\streamlit_app.py", line 1006, in run_review_process
+    await orchestrator.run_round_1()
+File "D:\paper_review_system_multi\core\orchestrator.py", line 176, in run_round_1
+    responses = await asyncio.gather(*tasks)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "D:\paper_review_system_multi\llm\interface.py", line 215, in generate_response
+    return await self._generate_cloud_async(system_prompt, user_prompt)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "D:\paper_review_system_multi\llm\interface.py", line 325, in _generate_cloud_async
+    return await asyncio.to_thread(self._generate_cloud_sync, api_key, model_name, api_url, system_prompt, user_prompt)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+====
+
+另外，參數設定的OPENAI，也如同GEMINI一樣可以偵測可用模型下拉選單(包含線上使用者選用推論引擎的OPENAI相容也需要)
+
+Ran 3 commands
+前 311 行完好，損壞從 _generate_cloud_async 開始。重建檔案尾段並加入新功能：
+
+Ran 5 commands
+加個回歸測試防止這個 bug 再發生，然後提交：
+
+Ran 2 commands
+使用者端 git 在 config 加了 Windows 路徑的 worktree（VM 看不到 D:\），改用參數覆寫提交:
+
+Ran 3 commands
+修復完成並已提交（508e444），27 個測試全數通過。
+
+錯誤原因：llm/interface.py 檔案內容損毀——_generate_cloud_sync、_generate_mock_async、list_models 等方法整段遺失，檔尾殘缺，所以選 OpenAI 雲端執行審查時一呼叫就 AttributeError。已完整重建該檔（保留你端新增的 Gemini 空回應處理邏輯），並加了一支「介面完整性回歸測試」，之後任何方法遺失都會在 pytest 直接被抓出來。
+
+新功能：OpenAI 相容模型偵測（比照 Gemini 體驗）已加到兩處——「管理員（參數設定）」的 OpenAI-Compatible 區塊，以及「線上使用者」側邊欄的 OpenAI 相容引擎。點「🔍 偵測可用模型」會以你的 API Key 呼叫該端點的 /models API（自動從 chat endpoint 推導，OpenAI／DeepSeek／Groq／OpenRouter 都適用），成功後出現下拉選單，選取即套用，也可維持手動輸入。
+
+另外兩件事：你目前是用 streamlit_app.py 啟動的（app.py 的複本），這次已把兩支檔案同步並一起納入版控，之後我改任一邊都會保持一致；還注意到你的 git 設定多了一個指向 HuggingFace 的 remote——若打算推上 HF Space，請確認 config.json（含金鑰）沒有被包含在推送內容中（目前它已被 .gitignore 排除，維持現狀即安全）。

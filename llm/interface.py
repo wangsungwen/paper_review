@@ -308,16 +308,15 @@ class LLMInterface:
             if "context window" in error_msg.lower():
                 return "【模型限制】內容過長，超過 Context Window。"
             return f"【推論錯誤】：{error_msg}"
-
     async def _generate_cloud_async(self, system_prompt: str, user_prompt: str) -> str:
         cloud_config = self.config.get("cloud", {})
         provider = cloud_config.get("provider", "openai")
         api_key = cloud_config.get("api_key", "")
         model_name = cloud_config.get("model_name", "gpt-4o")
-        
+
         if not api_key or "YOUR_CLOUD_API_KEY_HERE" in api_key:
             return "錯誤：請先在 config.json 中填入有效的 API Key。"
-            
+
         if provider == "gemini":
             return await asyncio.to_thread(self._generate_gemini_sync, api_key, model_name, system_prompt, user_prompt)
         else:
@@ -330,43 +329,174 @@ class LLMInterface:
         model_name = model_name.strip()
         if model_name.startswith("models/"):
             model_name = model_name.replace("models/", "", 1)
-        
-        # Google Gemini API (REST) - 智慧 API 版本選擇：新世代、預覽版、實驗版模型僅支援 v1beta 介面，直接導向以享受自動重試與速率限制退避
+
+        # 新世代 / 預覽 / 實驗版模型僅支援 v1beta 介面
         is_beta_model = any(x in model_name.lower() for x in ["preview", "exp", "beta", "2.0", "3.0", "3.1", "3.5", "4.0"])
         api_version = "v1beta" if is_beta_model else "v1"
         url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model_name}:generateContent?key={api_key}"
-        headers = {
-            "Content-Type": "application/json"
-        }
-        
-        # 建立組合提示詞
+        headers = {"Content-Type": "application/json"}
+
         combined_prompt = f"系統指令：\n{system_prompt}\n\n請根據以上指令處理以下內容：\n{user_prompt}"
-        
         payload = {
-            "contents": [
-                {
-                    "role": "user", 
-                    "parts": [{"text": combined_prompt}]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.7
-            }
+            "contents": [{"role": "user", "parts": [{"text": combined_prompt}]}],
+            "generationConfig": {"temperature": 0.7},
         }
 
         max_retries = 5
         for attempt in range(max_retries):
             try:
                 response = requests.post(url, headers=headers, json=payload, timeout=60)
+
+                # 處理 429 (Rate Limit) 或 503 (Overloaded)
+                if response.status_code in [429, 503]:
+                    import random
+                    base_wait = (2 ** attempt) * 5 + random.uniform(0, 1)
+                    wait_time = base_wait
+                    try:
+                        response_data = response.json()
+                        error_data = response_data.get("error", {})
+                        retry_info = error_data.get("details", [])
+                        for detail in retry_info:
+                            if detail.get("@type") == "type.googleapis.com/google.rpc.RetryInfo":
+                                retry_delay_str = detail.get("retryDelay", "5s")
+                                wait_time = float(retry_delay_str.rstrip("s"))
+                                if wait_time < 2:
+                                    wait_time = base_wait
+                                break
+                        if error_data.get("status") == "RESOURCE_EXHAUSTED":
+                            error_msg = error_data.get("message", "")
+                            has_retry_delay = any(d.get("@type") == "type.googleapis.com/google.rpc.RetryInfo" for d in retry_info)
+                            if "limit: 0" in error_msg and not has_retry_delay:
+                                return f"【Gemini 額度耗盡】：您的每日 API 配額已用完。請更換 API Key 或明日再試。\n詳細訊息：{error_msg}"
+                    except Exception:
+                        pass
+                    if attempt < max_retries - 1:
+                        status_name = "速率限制 (429)" if response.status_code == 429 else "伺服器忙碌 (503)"
+                        print(f"Gemini {status_name}，等待 {wait_time:.2f} 秒後進行第 {attempt+2} 次重試...")
+                        time.sleep(wait_time)
+                        continue
+
+                if response.status_code != 200:
+                    # 404 可能是 v1 不支援該模型，改試 v1beta
+                    if response.status_code == 404:
+                        url_beta = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                        response = requests.post(url_beta, headers=headers, json=payload, timeout=60)
+                        if response.status_code != 200:
+                            return f"【Gemini API 錯誤】：找不到模型或 API 版本不支援。請確認模型名稱 '{model_name}' 是否正確。({response.status_code})"
+                    else:
+                        return f"【Gemini API 錯誤】：{response.status_code} - {response.text}"
+
+                data = response.json()
+                candidates = data.get("candidates", [])
+                if not candidates:
+                    detail = data.get("promptFeedback", data)
+                    return f"【Gemini 沒給出回應】：{detail}"
+                parts = candidates[0].get("content", {}).get("parts", [])
+                result = "".join(part.get("text", "") for part in parts).strip()
+                if not result:
+                    return "【Gemini API 錯誤】：模型回應為空。"
+                return result
+
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return f"【連線錯誤】：{str(e)}"
+
+        return "【Gemini 錯誤】：已達最大重試次數，仍受速率限制。"
+
+    def list_models(self, api_key: str = None) -> str:
+        """列出 Gemini API Key 可用的所有模型 (逗號分隔字串，用於除錯與 UI 顯示)。"""
+        if not api_key:
+            cloud_config = self.config.get("cloud", {})
+            api_key = cloud_config.get("api_key", "").strip()
+
+        if not api_key or api_key == "YOUR_NEW_GEMINI_API_KEY":
+            return "錯誤：未設定有效 API Key。"
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        try:
+            response = requests.get(url, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                models = [m.get("name", "").replace("models/", "") for m in data.get("models", [])]
+                return "、".join(models) if models else "找不到任何模型。"
+            else:
+                return f"無法取得模型清單 ({response.status_code}): {response.text}"
+        except Exception as e:
+            return f"連線失敗: {str(e)}"
+
+    @staticmethod
+    def models_endpoint_from_chat_url(api_url: str) -> str:
+        """從 chat/completions 端點推導 /models 端點。
+
+        例：https://api.deepseek.com/v1/chat/completions → https://api.deepseek.com/v1/models
+        """
+        api_url = (api_url or "").strip().rstrip("/")
+        if api_url.endswith("/chat/completions"):
+            return api_url[: -len("/chat/completions")] + "/models"
+        # 已是 base (如 .../v1) 的情況
+        return api_url + "/models"
+
+    def list_openai_models(self, api_key: str, api_url: str = None):
+        """列出 OpenAI 相容服務可用的模型。
+
+        成功回傳模型 id 的 list[str] (依字母排序)；失敗回傳錯誤訊息字串。
+        適用 OpenAI / DeepSeek / Groq / OpenRouter 等相容端點。
+        """
+        api_key = (api_key or "").strip()
+        if not api_key:
+            return "錯誤：未設定有效 API Key。"
+
+        if not api_url:
+            api_url = self.config.get("cloud", {}).get("api_url", "https://api.openai.com/v1/chat/completions")
+        url = self.models_endpoint_from_chat_url(api_url)
+
+        try:
+            response = requests.get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=30)
+            if response.status_code != 200:
+                return f"無法取得模型清單 ({response.status_code}): {response.text[:300]}"
+            data = response.json()
+            items = data.get("data", data.get("models", []))
+            models = []
+            for m in items:
+                mid = m.get("id") if isinstance(m, dict) else str(m)
+                if mid:
+                    models.append(mid)
+            if not models:
+                return "找不到任何模型。"
+            return sorted(models)
+        except Exception as e:
+            return f"連線失敗: {str(e)}"
+
+    def _generate_cloud_sync(self, api_key: str, model_name: str, api_url: str, system_prompt: str, user_prompt: str) -> str:
+        url = api_url
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        payload = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.7,
+        }
+
+        # 增加重試次數與等待時間，以應對嚴格的 TPM 限制
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=60)
                 if response.status_code == 429:
-                    # 隨著重試次數增加，等待時間大幅拉長 (指數退避)
                     wait_time = (attempt + 1) * 20
                     print(f"收到 429 (TPM 限制)，正在等待 {wait_time} 秒後重試...")
                     time.sleep(wait_time)
                     continue
                 response.raise_for_status()
                 data = response.json()
-                return data['choices'][0]['message']['content'].strip()
+                return data["choices"][0]["message"]["content"].strip()
             except Exception as e:
                 if attempt == max_retries - 1:
                     return f"【雲端 API 錯誤】：{str(e)}"
