@@ -193,3 +193,42 @@ Ran a command
 這兩顆按鍵之前沒被涵蓋是因為它們不屬於一般按鈕元件——「當前參數」是 popover 觸發鈕、「Browse files」藏在檔案上傳器內部。這次除了個別處理，還加了一條通用安全網規則：主畫面與側邊欄內所有 Streamlit 底層按鈕（stBaseButton-*）一律套用高對比按鈕配色，之後任何新出現的次要按鈕都會自動跟上主題，不會再漏。
 
 同時補了三處深色模式的配套：「當前參數」點開後的彈出面板改為深色底、上傳區的「Drag and drop file here」說明文字、已上傳檔名也都跟隨配色。重新整理頁面即可確認。
+
+請製作一本這個專案開發全功能說明手冊，逐一說明每一個功能的操作講解與使用方式，最好可以圖文併茂，可以WORD文件下載
+
+Updated tasks, ran 2 commands
+Updated tasks, ran 2 commands
+Fonts available. Generating the manual figures:
+
+Read 5 files, ran 2 commands
+Read 5 files, ran 2 commands
+Fixing the missing emoji glyphs in fig5, then reading the docx skill:
+
+Updated tasks, ran a command, read a file
+Updated tasks, ran a command, read a file
+Now building the Word manual with docx-js:
+
+Ran 4 commands
+Ran 4 commands
+Now rendering to images to verify layout:
+
+Read 4 files, ran 3 commands
+Read 4 files, ran 3 commands
+Layout is good, but numbered steps continue across chapters (5,6,7 in chapter 3). Fixing by giving each step group its own numbering instance:
+
+Ran 2 commands, read a file
+Ran 2 commands, read a file
+編號已修正。將手冊存入專案資料夾並提交：
+
+Ran a command, updated tasks, read a file
+Ran a command, updated tasks, read a file
+手冊完成，共 13 頁，已存於專案的 docs 資料夾並提交版控（c01ae25）。
+
+內容涵蓋九大章：系統簡介與架構、四種安裝部署方式（Windows／Linux／Docker／EXE）、初始設定與金鑰管理（含環境變數對照表）、介面導覽與三種工作區、五種推論引擎設定、動態知識擴充三策略，以及最核心的「步驟 1 到步驟 5 完整審查流程」逐步操作教學，最後附疑難排解 FAQ 與專案結構附錄。
+
+圖文部分配有六張依系統實際配色繪製的插圖：系統架構圖、三輪審查流程圖、主畫面操作動線、知識擴充策略圖、深淺模式對照、推論引擎總覽。操作步驟用編號清單、對照資訊用深藍表頭表格、注意事項用引言框呈現，開啟後目錄會提示更新欄位（點「是」即自動生成頁碼）。
+
+一點說明：插圖是示意圖而非實際畫面截圖——若你希望改用真實操作截圖，可以在本機開啟系統後截幾張圖給我，我可以直接替換進手冊。
+
+D:\paper_review_system_multi\docs\多代理人論文審查系統_全功能操作手冊_v6.0.docx
+Document
