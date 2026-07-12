@@ -1,6 +1,23 @@
-# 多代理人論文審查系統 - 使用說明 (v5.5 終極知識聯網版)
+# 多代理人論文審查系統 - 使用說明 (v6.0 架構重構版)
 
-本系統是一個專業級的多代理人 AI 論文審查平台，已全面升級為 **網頁伺服器架構**。特別針對高階硬體 (如 NVIDIA RTX 5090 Blackwell) 進行深度優化，支援大規模併發連線、會話隔離隱私保護與全域模型快取，並**全新導入動態知識擴充機制以突破 AI 知識時間落差**。
+本系統是一個專業級的多代理人 AI 論文審查平台，已全面升級為 **網頁伺服器架構**。特別針對高階硬體 (如 NVIDIA RTX 5090 Blackwell) 進行深度優化，支援大規模併發連線、會話隔離隱私保護與全域模型快取，並**導入動態知識擴充機制以突破 AI 知識時間落差**。
+
+## 🆕 v6.0 重點升級
+
+- **全文審查 (取代 5000 字截斷)**：論文長度依模型 context window 動態配置；超長論文自動啟動 map-reduce 分段摘要，方法與實驗章節不再被漏審。
+- **RAG 強化**：Arxiv 改用標準 XML 解析；聯網搜尋支援 Tavily API (無金鑰時自動退回 Wikipedia)；上傳文獻改以 TF-IDF 節選與論文最相關的段落注入。
+- **架構分層**：`app.py` (UI) / `services/` (設定、檔案、Ollama) / `core/` (審查引擎、知識檢索) / `llm/` (推論介面) / `tests/` (pytest 單元測試)。
+- **安全性**：`config.json` 不入版控 (以 `config.example.json` 為範本)；金鑰可改用環境變數 `PRS_CLOUD_API_KEY`、`PRS_GEMINI_API_KEY`、`PRS_GPTZERO_API_KEY`、`PRS_TAVILY_API_KEY` 注入；EXE 打包不再內含設定檔。
+- **Blackwell 防閃退模式改為設定檔控制**：`local.force_cpu_on_blackwell` (預設 false，即全速 GPU)。
+- **相依管理**：新增 `pyproject.toml` (extras: `detector` / `local` / `build` / `dev`)；requirements 全面轉為 UTF-8。
+
+### 初次設定
+
+```bash
+cp config.example.json config.json   # 再填入你的 API Key (或改用環境變數)
+pip install -e ".[detector]"          # 或沿用 pip install -r requirements.txt
+pytest                                # 執行單元測試
+```
 
 ---
 
@@ -98,27 +115,4 @@ streamlit run app.py
 ```
 
 #### 【環境 C】Docker 容器化無痛部署 (無干擾推薦)
-如果您希望完全隔絕環境污染，可以直接使用 Docker 化架構一鍵啟動：
-
-```bash
-# 背景部署容器 (包含自動透通掛載 config 與 local_models)
-docker compose up -d
-```
-若要在 Docker 內啟用 NVIDIA GPU 加速，請先取消 `docker-compose.yml` 內 deploy 區塊的註解。
-
-### 3. 打包與發佈 (EXE 版)
-如果您希望將此系統作為無須安裝環境的可攜式軟體分發：
-
-```powershell
-python build_exe.py
-```
-執行完後，結果將輸出於 `dist/PaperReviewSystem/` 內。 **注意**：為避免執行檔體積過大，`local_models` 模型資料夾與裡面的 `.gguf` 並未被打包。請務必在發布前，手動將 `local_models` 資料夾複製並放置於 `PaperReviewSystem.exe` 同一層級！
-
----
-
-## ⚠️ 常見問題
-- **隱私安全性**：畫面上輸入的所有 API 金鑰僅存在於您的瀏覽器視窗中，登出或重新整理即清除，後台管理員無法窺視。
-- **驅動與 CUDA Error**：若遇到 `no kernel image`，請至「⚙️ 參數設定」勾選「強制使用 CPU 進行 AI 偵測」。若啟動時遇到 `cudaGetDriverEntryPointByVersion` 錯誤，請更新實體主機的 NVIDIA 顯示卡驅動。
-
----
-*本系統旨在透過多代理人協作與動態知識擴充，全面提升學術論文的審查效率與品質。*
+如�
