@@ -1,1118 +1,549 @@
-# app.py
-import streamlit as st
+"""Gradio UI for the multi-agent paper review system.
+
+The application keeps API keys in per-request temporary configuration files and
+never writes them to the repository configuration.  The former Streamlit UI is
+kept in ``streamlit_app.py`` for local backwards compatibility.
+"""
+
+from __future__ import annotations
+
 import asyncio
+import copy
+import html
 import json
 import os
-import sys
-import copy
+import tempfile
+from pathlib import Path
+from typing import Iterable
 
-# -----------------------------------------------------------
-# 處理 Tkinter (雲端環境不支援時的防呆機制)
-# -----------------------------------------------------------
+import gradio as gr
+import requests
+
 try:
-    import tkinter as tk
-    from tkinter import filedialog
-    TK_AVAILABLE = True
-except (ImportError, Exception):
-    TK_AVAILABLE = False
+    import spaces
 
-# -----------------------------------------------------------
-# 處理 llama-cpp (檢查本地模型套件是否已安裝)
-# -----------------------------------------------------------
-try:
-    import llama_cpp
-    HAS_LLAMA_CPP = True
-except ImportError:
-    HAS_LLAMA_CPP = False
+    gpu_task = spaces.GPU(duration=120)
+except (ImportError, RuntimeError):
+    def gpu_task(function):
+        return function
 
-# -----------------------------------------------------------
-# 匯入自定義模組
-# -----------------------------------------------------------
+from core.orchestrator import PaperReviewOrchestrator
+from llm.interface import LLMInterface
 from models.paper import Paper
 from models.reviewer import ReviewerAgent
-from llm.interface import LLMInterface
-from core.orchestrator import PaperReviewOrchestrator
-from core.ai_detector import AIDetector
-from services import config_service, ollama_service
-from services.file_service import (
-    check_model_exists,
-    extract_text_from_file,
-    apply_text_filters,
-)
-from ui import theme as ui_theme
+from services import config_service
+from services.file_service import apply_text_filters, extract_text_from_file
 
 
-# ===========================================================
-# 工具函式區塊 (僅保留與 UI 直接相關者，其餘已抽至 services/)
-# ===========================================================
+APP_TITLE = "多代理人論文審查系統"
+DEFAULT_REVIEWERS = [
+    ["Dr. Alan", "電腦視覺與深度學習", "輕量化神經網路架構", "嚴格，要求完整數據驗證"],
+    ["Prof. Lin", "嵌入式與邊緣運算", "微控制器整合與邊緣 AI", "務實且具建設性，重視落地性"],
+]
 
-def select_file(current_path=""):
-    """ 開啟檔案選擇視窗並返回路徑 """
-    if not TK_AVAILABLE:
-        return None
+
+class UploadedFileAdapter:
+    """Give a Gradio filepath the small file API expected by file_service."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self.name = Path(path).name
+        self._handle = open(path, "rb")
+
+    def seek(self, offset: int):
+        return self._handle.seek(offset)
+
+    def read(self, size: int = -1):
+        return self._handle.read(size)
+
+    def getvalue(self):
+        position = self._handle.tell()
+        self._handle.seek(0)
+        data = self._handle.read()
+        self._handle.seek(position)
+        return data
+
+    def close(self):
+        self._handle.close()
+
+
+def _extract_path(path: str | None) -> str:
+    if not path:
+        return ""
+    adapter = UploadedFileAdapter(path)
     try:
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        initial_dir = os.path.dirname(current_path) if current_path and os.path.exists(os.path.dirname(current_path)) else os.getcwd()
-        file_path = filedialog.askopenfilename(
-            initialdir=initial_dir, 
-            title="選擇 GGUF 模型檔案", 
-            filetypes=[("GGUF files", "*.gguf"), ("All files", "*.*")]
-        )
-        root.destroy()
-        return file_path
-    except Exception:
-        return None
-
-def get_temp_user_config_path(user_conf):
-    """ 為線上使用者生成臨時設定檔路徑，保護伺服器實體 config.json 不被污染 """
-    st.session_state.config_temp_path = config_service.write_temp_user_config(
-        user_conf, st.session_state.get("config_temp_path")
-    )
-    return st.session_state.config_temp_path
+        return extract_text_from_file(adapter)
+    finally:
+        adapter.close()
 
 
-# ===========================================================
-# 系統設定檔管理初始化 (詳見 services/config_service.py)
-# ===========================================================
-
-st.set_page_config(page_title="多代理人論文審查系統", page_icon="🎓", layout="wide")
-ui_theme.inject_theme()
-
-config_path = config_service.ensure_config_exists()
-
-def load_global_config():
-    return config_service.load_global_config(config_path)
-
-def save_global_config(config):
-    config_service.save_global_config(config, config_path)
+def parse_paper_file(path: str | None):
+    if not path:
+        return "", "尚未上傳檔案。"
+    try:
+        content = _extract_path(path)
+        return content, f"✅ 已解析 **{Path(path).name}**，共 {len(content):,} 個字元。"
+    except Exception as exc:
+        return "", f"❌ {exc}"
 
 
-# ===========================================================
-# 核心狀態初始化 (Session State) - 多租戶隔離關鍵
-# ===========================================================
-
-# 處理強制重載設定檔的邏輯 (確保 UI 切換立刻生效)
-if "force_reload_config" in st.session_state and st.session_state.force_reload_config:
-    st.session_state.global_config_cache = load_global_config()
-    st.session_state.user_config = copy.deepcopy(st.session_state.global_config_cache)
-    st.session_state.force_reload_config = False
-
-# 1. 讀取並暫存伺服器全域設定 (最高權限)
-if "global_config_cache" not in st.session_state:
-    st.session_state.global_config_cache = load_global_config()
-
-# 2. 發配一份獨立的設定檔給當前連線的網頁使用者
-if "user_config" not in st.session_state:
-    st.session_state.user_config = copy.deepcopy(st.session_state.global_config_cache)
-
-# 3. 各項面板與紀錄狀態
-if "review_history" not in st.session_state:
-    st.session_state.review_history = None
-
-if "review_stats" not in st.session_state:
-    st.session_state.review_stats = {}
-
-if "ai_report" not in st.session_state:
-    st.session_state.ai_report = None
-
-if "reviewers" not in st.session_state:
-    st.session_state.reviewers = [
-        ReviewerAgent("Dr. Alan", "電腦視覺與深度學習", "輕量化神經網路架構", "極度嚴格，要求完整數據驗證。"),
-        ReviewerAgent("Prof. Lin", "嵌入式與邊緣運算", "微控制器整合與邊緣AI", "務實且具建設性，重視系統現場落地性。")
-    ]
-
-if "paper_content_text_area" not in st.session_state:
-    st.session_state.paper_content_text_area = ""
-
-if "last_uploaded_file" not in st.session_state:
-    st.session_state.last_uploaded_file = None
-
-if "reference_content" not in st.session_state:
-    st.session_state.reference_content = ""
-
-if "exclusion_keywords" not in st.session_state:
-    st.session_state.exclusion_keywords = ""
-
-if "manual_exclusions" not in st.session_state:
-    st.session_state.manual_exclusions = []
+def parse_reference_files(paths: Iterable[str] | None):
+    paths = list(paths or [])
+    if not paths:
+        return "", "未加入參考文獻。"
+    blocks, errors = [], []
+    for path in paths:
+        try:
+            blocks.append(f"【{Path(path).name}】\n{_extract_path(path)}")
+        except Exception as exc:
+            errors.append(f"{Path(path).name}: {exc}")
+    status = f"✅ 已解析 {len(blocks)} 份參考文獻。"
+    if errors:
+        status += "\n\n⚠️ " + "；".join(errors)
+    return "\n\n".join(blocks), status
 
 
-# ===========================================================
-# 側邊欄：雙入口身分切換與控制面板
-# ===========================================================
-
-with st.sidebar:
-    st.markdown(
-        '<div style="padding:.2rem 0 .6rem;">'
-        '<div style="font-size:1.15rem;font-weight:700;color:#1F4E79;">🎓 論文審查平台</div>'
-        '<div style="font-size:.8rem;color:#64748B;">Multi-Agent Paper Review</div>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-    ui_theme.theme_toggle()
-    st.header("工作區切換")
-    
-    entry_mode = st.radio(
-        "選擇進入入口", 
-        ["🌐 線上使用者", "💻 管理員 (單機推論)", "⚙️ 管理員 (參數設定)"]
-    )
-    
-    st.divider()
-
-    # 記錄當前身分與對應的設定檔路徑
-    is_admin = False
-    active_config = None
-    active_config_path = ""
-
-    # -------------------------------------------------------
-    # 模式一：線上使用者 (安全隔離區)
-    # -------------------------------------------------------
-    if entry_mode == "🌐 線上使用者":
-        st.success("🔒 **安全隔離模式已啟動**\n您的設定僅存於記憶體中，關閉視窗即自動清除。")
-        
-        st.subheader("推論引擎")
-        st.caption("選擇雲端或本地推論引擎")
-        
-        user_provider = st.radio(
-            "選擇引擎", 
-            ["Gemini (推薦)", "OpenAI 相容", "Ollama (本地高併發)"], 
-            label_visibility="collapsed"
-        )
-        
-        if user_provider == "Ollama (本地高併發)":
-            st.session_state.user_config["llm_mode"] = "ollama"
-            st.info("Ollama 模式將使用伺服器本地資源進行高效能併發推論，不需輸入 API Key。")
-            
-            ollama_base_url = st.session_state.user_config.get("ollama", {}).get("base_url", "http://localhost:11434")
-            try:
-                # 取得本地 Ollama 的可用模型
-                local_models = ollama_service.list_local_models(ollama_base_url)
-                st.success("✅ Ollama 伺服器連線正常，可開始推論！")
-                if not local_models:
-                    local_models = ["llama3.1"]
-                
-                st.caption("選擇您的本地 Ollama 模型")
-                current_ollama_model = st.session_state.user_config.get("ollama", {}).get("model_name", "llama3.1")
-                
-                # 確保當前模型在清單中
-                default_idx = 0
-                if current_ollama_model in local_models:
-                    default_idx = local_models.index(current_ollama_model)
-                elif current_ollama_model + ":latest" in local_models:
-                    default_idx = local_models.index(current_ollama_model + ":latest")
-                
-                selected_ollama_model = st.selectbox(
-                    "選擇 Ollama 模型", 
-                    local_models, 
-                    index=default_idx,
-                    key="online_ollama_model_select",
-                    label_visibility="collapsed"
-                )
-                st.session_state.user_config.setdefault("ollama", {})["model_name"] = selected_ollama_model
-                
-            except Exception:
-                st.error("⚠️ 伺服器端的 Ollama 服務似乎未啟動。請通知管理員。")
-                
-        else:
-            st.caption("輸入您的 API Key")
-            user_key = st.text_input("輸入您的 API Key", type="password", autocomplete="new-password", label_visibility="collapsed")
-            
-            if user_provider == "Gemini (推薦)":
-                st.session_state.user_config["llm_mode"] = "cloud"
-                st.session_state.user_config.setdefault("cloud", {})
-                st.session_state.user_config["cloud"]["provider"] = "gemini"
-                st.session_state.user_config["cloud"]["api_key"] = user_key
-                
-                if st.button("🔍 偵測可用模型", key="online_detect_models_btn"):
-                    if not user_key:
-                        st.error("請先填入您的 API Key！")
-                    else:
-                        with st.spinner("正在與 Google 伺服器驗證金鑰..."):
-                            llm_service = LLMInterface(config_path="config.json")
-                            available_models = llm_service.list_models(api_key=user_key)
-                            
-                            if "錯誤" in available_models or "失敗" in available_models:
-                                st.error(f"**金鑰無效或連線失敗：**\n\n{available_models}")
-                            else:
-                                st.success(f"**✅ 驗證成功！可用模型清單：**\n\n{available_models}")
-
-                # ==========================================
-                # 【新增功能】可編輯的自訂 Gemini 模型選項
-                # ==========================================
-                st.caption("選擇或輸入 Gemini 模型")
-                gemini_presets = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b", "gemini-2.0-flash-exp", "gemini-2.5-flash", "自訂 (Custom)"]
-                
-                # 讀取目前選擇的模型，若無則預設為 flash
-                current_model = st.session_state.user_config["cloud"].get("model_name", "gemini-1.5-flash")
-                
-                # 判斷 index，如果目前的模型不在預設清單中，就選中 "自訂 (Custom)"
-                preset_index = gemini_presets.index("自訂 (Custom)")
-                if current_model in gemini_presets:
-                    preset_index = gemini_presets.index(current_model)
-                
-                selected_preset = st.selectbox(
-                    "選擇 Gemini 模型", 
-                    gemini_presets,
-                    index=preset_index,
-                    label_visibility="collapsed"
-                )
-                
-                # 如果使用者選了「自訂」，就展開文字輸入框讓他們自己打
-                if selected_preset == "自訂 (Custom)":
-                    user_model = st.text_input(
-                        "輸入自訂模型名稱", 
-                        value=current_model if current_model not in gemini_presets else "",
-                        placeholder="例如: gemini-1.5-pro-latest"
-                    )
-                else:
-                    user_model = selected_preset
-                    
-                st.session_state.user_config["cloud"]["model_name"] = user_model
-                # ==========================================
-                
-            else:
-                st.session_state.user_config["llm_mode"] = "cloud"
-                st.session_state.user_config.setdefault("cloud", {})
-                st.session_state.user_config["cloud"]["provider"] = "openai"
-                st.session_state.user_config["cloud"]["api_key"] = user_key
-                
-                st.caption("輸入 OpenAI 模型名稱")
-                user_model = st.text_input("輸入 OpenAI 模型名稱", value="gpt-4o", label_visibility="collapsed")
-                st.session_state.user_config["cloud"]["model_name"] = user_model
-
-                # 偵測 OpenAI 相容端點的可用模型 (與 Gemini 相同體驗)
-                if st.button("🔍 偵測可用模型", key="online_openai_detect_btn"):
-                    if not user_key:
-                        st.error("請先填入您的 API Key！")
-                    else:
-                        with st.spinner("正在取得可用模型清單..."):
-                            llm_service = LLMInterface(config_path="config.json")
-                            result = llm_service.list_openai_models(
-                                user_key,
-                                st.session_state.user_config["cloud"].get(
-                                    "api_url", "https://api.openai.com/v1/chat/completions"
-                                ),
-                            )
-                        if isinstance(result, list):
-                            st.session_state["online_openai_models"] = result
-                            st.success(f"✅ 驗證成功！共偵測到 {len(result)} 個可用模型。")
-                        else:
-                            st.error(f"**金鑰無效或連線失敗：**\n\n{result}")
-                if st.session_state.get("online_openai_models"):
-                    picked = st.selectbox(
-                        "從偵測到的模型中選擇",
-                        ["(維持手動輸入)"] + st.session_state["online_openai_models"],
-                        key="online_openai_model_pick",
-                    )
-                    if picked != "(維持手動輸入)":
-                        st.session_state.user_config["cloud"]["model_name"] = picked
-        
-        # 綁定給後續推論流程使用
-        active_config = st.session_state.user_config
-        active_config_path = get_temp_user_config_path(active_config)
-
-    # -------------------------------------------------------
-    # 模式二與三：管理員 (最高權限區)
-    # -------------------------------------------------------
+def _build_config(
+    provider: str,
+    api_key: str,
+    model_name: str,
+    api_url: str,
+    detector_mode: str,
+    detector_key: str,
+    detector_url: str,
+    enable_rag: bool,
+    enable_web: bool,
+    enable_references: bool,
+    tavily_key: str,
+) -> dict:
+    config = copy.deepcopy(config_service.DEFAULT_CONFIG)
+    provider_code = {
+        "Gemini": "gemini",
+        "OpenAI 相容 API": "openai",
+        "Ollama 遠端服務": "ollama",
+        "模擬模式": "mock",
+    }[provider]
+    if provider_code == "ollama":
+        config["llm_mode"] = "ollama"
     else:
-        st.caption("請輸入系統管理員密碼")
-        pwd = st.text_input("請輸入系統管理員密碼", type="password", label_visibility="collapsed")
-        
-        if pwd == "admin":
-            is_admin = True
-            # 管理員模式直接讀取全域快取
-            active_config = st.session_state.global_config_cache
-            active_config_path = config_path
-            st.success("身分驗證成功！擁有伺服器完整存取權。")
-            
-            if entry_mode == "💻 管理員 (單機推論)":
-                st.subheader("🤖 LLM 快速切換")
-                
-                llm_modes = {
-                    "cloud": "☁️ 雲端 API (含 Gemini/OpenAI)",
-                    "gemini_native": "✨ Google Gemini 原生 SDK",
-                    "local": "💻 本地落地模型 (llama-cpp)",
-                    "ollama": "🐑 Ollama API (推薦)",
-                    "mock": "🛠️ 模擬測試模式"
-                }
-                
-                current_mode = active_config.get("llm_mode", "mock")
-                if current_mode not in llm_modes:
-                    current_mode = "mock"
-                    
-                selected_mode = st.selectbox(
-                    "切換 LLM 推論模式",
-                    options=list(llm_modes.keys()),
-                    index=list(llm_modes.keys()).index(current_mode),
-                    format_func=lambda x: llm_modes[x]
-                )
-                
-                if selected_mode != current_mode:
-                    active_config["llm_mode"] = selected_mode
-                    save_global_config(active_config)
-                    # 強制更新快取，確保一致性
-                    st.session_state.global_config_cache = copy.deepcopy(active_config)
-                    st.success(f"已切換至 {llm_modes[selected_mode]}")
-                    st.rerun()
-
-                # ===============================================
-                # Ollama 原汁原味的自動檢查與下載腳本 (僅管理員可用)
-                # ===============================================
-                if active_config.get("llm_mode") == "ollama":
-                    ollama_base_url = active_config.get("ollama", {}).get("base_url", "http://localhost:11434")
-                    if not ollama_service.is_running(ollama_base_url, timeout=1):
-                        st.error("⚠️ 偵測不到 Ollama 服務正在執行。")
-                        st.markdown("請確保您已安裝並啟動 Ollama。若尚未安裝：")
-                        st.markdown("1. 前往 [Ollama 官網](https://ollama.com/) 下載。")
-                        st.markdown("2. 或點擊下方按鈕自動下載並啟動安裝程式。")
-
-                        if st.button("🚀 自動下載並啟動 Ollama 安裝"):
-                            with st.spinner("正在下載 Ollama 安裝檔，檔案較大請耐心稍候... (下載完成後將自動啟動安裝)"):
-                                def _report(percent):
-                                    sys.stdout.write(f"\r[Ollama 輔助程式] 下載進度：{percent:.1f}%")
-                                    sys.stdout.flush()
-
-                                ok, msg = ollama_service.install(progress_callback=_report)
-                                if ok:
-                                    st.success(msg)
-                                else:
-                                    st.error(msg)
-        else:
-            st.warning("⚠️ 此區塊僅限管理員存取。請輸入正確密碼。")
-            # 移除 st.stop() 避免主畫面變空白
+        config["llm_mode"] = "mock" if provider_code == "mock" else "cloud"
+    config["cloud"].update({
+        "provider": provider_code,
+        "api_key": (api_key or "").strip(),
+        "model_name": (model_name or "").strip(),
+        "api_url": (api_url or "").strip(),
+    })
+    config["ollama"].update({
+        "host": (api_url or "").strip().rstrip("/"),
+        "base_url": (api_url or "").strip().rstrip("/"),
+        "model_name": (model_name or "").strip(),
+        "api_key": (api_key or "").strip(),
+        "max_tokens": 4096,
+        "keep_alive": "30m",
+        "timeout": 300,
+    })
+    config["ai_detector"].update({
+        # Cloud mode without a key intentionally falls back to the deterministic
+        # mock report without importing/downloading the Hugging Face model.
+        "mode": {"ZeroGPU 模型": "hf_model", "GPTZero API": "cloud", "模擬偵測": "cloud"}[detector_mode],
+        "api_key": (detector_key or "").strip(),
+        "api_url": (detector_url or "").strip(),
+        "force_cpu": False,
+    })
+    config["knowledge_update"].update({
+        "enable_rag": bool(enable_rag),
+        "enable_web_search": bool(enable_web),
+        "enable_reference_upload": bool(enable_references),
+        "tavily_api_key": (tavily_key or "").strip(),
+    })
+    return config
 
 
-# ===========================================================
-# 分頁 1：管理員系統參數設定
-# ===========================================================
-
-if entry_mode == "⚙️ 管理員 (參數設定)":
-    
-    ui_theme.hero("系統參數設定", "管理員專用 · 推論引擎、AI 偵測與知識更新策略之全域配置")
-    if not is_admin:
-        st.warning("🔒 請先於左側輸入管理員密碼以解鎖設定介面。")
-        st.stop()
-        
-    st.info("變更設定後，請點擊下方的「💾 儲存並套用設定」按鈕。")
-    
-    active_config.setdefault("cloud", {})
-    active_config.setdefault("local", {})
-    active_config.setdefault("ai_detector", {})
-    active_config.setdefault("ollama", {"model_name": "llama3.1", "base_url": "http://localhost:11434"})
-    active_config.setdefault("knowledge_update", {"enable_rag": False, "enable_web_search": False, "enable_reference_upload": False})
-    
-    col_a, col_b = st.columns(2)
-    
-    with col_a:
-        st.subheader("☁️ 雲端 LLM 設定")
-        
-        provider_options = ["OpenAI-Compatible", "Gemini"]
-        current_provider = active_config["cloud"].get("provider", "openai")
-        provider_index = 1 if current_provider == "gemini" else 0
-        
-        st.caption("API 類型")
-        selected_provider_type = st.radio(
-            "API 類型", 
-            provider_options, 
-            index=provider_index, 
-            horizontal=True,
-            label_visibility="collapsed"
-        )
-        
-        active_config["cloud"]["provider"] = "gemini" if selected_provider_type == "Gemini" else "openai"
-        active_config["llm_mode"] = "cloud"
-
-        if selected_provider_type == "OpenAI-Compatible":
-            openai_providers = {
-                "OpenAI": "https://api.openai.com/v1/chat/completions",
-                "DeepSeek": "https://api.deepseek.com/v1/chat/completions",
-                "Groq": "https://api.groq.com/openai/v1/chat/completions",
-                "OpenRouter": "https://openrouter.ai/api/v1/chat/completions",
-                "Custom": ""
-            }
-
-            current_api_url = active_config["cloud"].get("api_url", "https://api.openai.com/v1/chat/completions")
-            provider_key = "Custom"
-            for k, v in openai_providers.items():
-                if v == current_api_url and k != "Custom":
-                    provider_key = k
-                    break
-            
-            selected_preset = st.selectbox(
-                "模型來源預設 (OpenAI 格式)", 
-                list(openai_providers.keys()), 
-                index=list(openai_providers.keys()).index(provider_key)
-            )
-            
-            if selected_preset != "Custom":
-                active_config["cloud"]["api_url"] = openai_providers[selected_preset]
-                current_api_url = openai_providers[selected_preset]
-
-            active_config["cloud"]["api_url"] = st.text_input("API 端點 (Endpoint)", value=current_api_url)
-            active_config["cloud"]["model_name"] = st.text_input("模型名稱 (Model Name)", value=active_config["cloud"].get("model_name", "gpt-4o"))
-
-            # 偵測 OpenAI 相容端點的可用模型 (與 Gemini 相同體驗)
-            if st.button("🔍 偵測目前填入 API Key 可用的模型", key="admin_openai_detect_btn"):
-                admin_openai_key = active_config["cloud"].get("api_key", "")
-                if not admin_openai_key or "YOUR" in admin_openai_key:
-                    st.error("請先於下方填入有效的 API Key 並儲存 (或先填妥再點偵測)！")
-                else:
-                    with st.spinner("正在取得可用模型清單..."):
-                        llm_service = LLMInterface(config_path="config.json")
-                        result = llm_service.list_openai_models(
-                            admin_openai_key, active_config["cloud"].get("api_url", "")
-                        )
-                    if isinstance(result, list):
-                        st.session_state["admin_openai_models"] = result
-                        st.success(f"✅ 共偵測到 {len(result)} 個可用模型。")
-                    else:
-                        st.error(result)
-            if st.session_state.get("admin_openai_models"):
-                picked = st.selectbox(
-                    "從偵測到的模型中選擇",
-                    ["(維持手動輸入)"] + st.session_state["admin_openai_models"],
-                    key="admin_openai_model_pick",
-                )
-                if picked != "(維持手動輸入)":
-                    active_config["cloud"]["model_name"] = picked
-            
-        else:
-            st.info("Gemini 模式將使用 Google Generative AI REST API。")
-            
-            gemini_presets = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b", "gemini-2.0-flash-exp", "Custom"]
-            current_gemini_model = active_config["cloud"].get("model_name", "gemini-1.5-flash")
-            
-            model_key = "Custom"
-            if current_gemini_model in gemini_presets:
-                model_key = current_gemini_model
-                
-            selected_gemini_preset = st.selectbox(
-                "選取 Gemini 模型", 
-                gemini_presets, 
-                index=gemini_presets.index(model_key)
-            )
-            
-            if selected_gemini_preset != "Custom":
-                active_config["cloud"]["model_name"] = selected_gemini_preset
-                current_gemini_model = selected_gemini_preset
-
-            active_config["cloud"]["model_name"] = st.text_input("模型名稱 (Model Name)", value=current_gemini_model)
-
-        cloud_api_show = st.checkbox("顯示 Key", key="show_cloud_api")
-        active_config["cloud"]["api_key"] = st.text_input(
-            "API Key", 
-            value=active_config["cloud"].get("api_key", ""), 
-            type="default" if cloud_api_show else "password",
-            autocomplete="new-password"
-        )
-
-        if selected_provider_type == "Gemini":
-            if st.button("🔍 偵測目前填入 API Key 可用的模型"):
-                if not active_config["cloud"]["api_key"] or "YOUR" in active_config["cloud"]["api_key"]:
-                    st.error("請先填入您從 Google AI Studio 取得的 API Key！")
-                else:
-                    llm_service = LLMInterface(config_path="config.json")
-                    available_models = llm_service.list_models(api_key=active_config["cloud"]["api_key"])
-                    st.write(f"**可用模型清單：**\n{available_models}")
-
-        st.divider()
-        
-        st.subheader("🔍 AI Detector 設定")
-        
-        detector_options = {
-            "Hugging Face 神經網路 (推薦)": "hf_model",
-            "GPTZero API (雲端)": "cloud",
-            "本地落地模型 (Local LLM)": "local"
-        }
-        
-        current_det_mode = active_config["ai_detector"].get("mode", "hf_model")
-        det_index = 0
-        for i, (ui_text, sys_code) in enumerate(detector_options.items()):
-            if sys_code == current_det_mode:
-                det_index = i
-                break
-        
-        st.caption("偵測模式")
-        selected_det_ui = st.radio(
-            "偵測模式", 
-            list(detector_options.keys()), 
-            index=det_index, 
-            label_visibility="collapsed"
-        )
-        
-        active_config["ai_detector"]["mode"] = detector_options[selected_det_ui]
-
-        if active_config["ai_detector"]["mode"] == "hf_model":
-            st.info("Hugging Face 模式將不需聯網，直接使用 Desklib 神經網路模型處理 (效能與精準度最佳)。")
-            active_config["ai_detector"]["force_cpu"] = st.checkbox(
-                "強制使用 CPU 進行 AI 偵測", 
-                value=active_config["ai_detector"].get("force_cpu", False)
-            )
-            
-        elif active_config["ai_detector"]["mode"] == "cloud":
-            detector_api_show = st.checkbox("顯示 GPTZero Key", key="show_detector_api")
-            active_config["ai_detector"]["api_key"] = st.text_input(
-                "GPTZero API Key", 
-                value=active_config["ai_detector"].get("api_key", ""), 
-                type="default" if detector_api_show else "password"
-            )
-            active_config["ai_detector"]["api_url"] = st.text_input(
-                "GPTZero API Endpoint",
-                value=active_config["ai_detector"].get("api_url", "https://api.gptzero.me/v2/predict/text")
-            )
-            
-        elif active_config["ai_detector"]["mode"] == "local":
-            st.info("本地模式將優先使用右方「💻 本地 LLM 設定」中載入的模型。注意：大模型極度消耗運算資源，且請確保上下文窗口 (n_ctx) 足夠容納全文。")
-
-    with col_b:
-        st.subheader("💻 本地 LLM 設定 (GGUF)")
-        
-        if "model_path_widget" not in st.session_state:
-            st.session_state.model_path_widget = active_config["local"].get("model_path", "")
-            
-        def on_browse_click():
-            picked_path = select_file(st.session_state.model_path_widget)
-            if picked_path:
-                st.session_state.model_path_widget = picked_path
-
-        st.caption("GGUF 模型檔案路徑")
-        path_col1, path_col2 = st.columns([0.85, 0.15])
-        
-        with path_col1:
-            model_path_input = st.text_input("GGUF 模型檔案路徑", key="model_path_widget", label_visibility="collapsed")
-        with path_col2:
-            if TK_AVAILABLE:
-                st.button("📂", help="瀏覽檔案系統", on_click=on_browse_click)
-            else:
-                st.button("📂", disabled=True)
-
-        active_config["local"]["model_path"] = model_path_input
-        
-        st.caption("上下文窗口大小 (n_ctx)")
-        active_config["local"]["n_ctx"] = st.number_input(
-            "上下文窗口大小 (n_ctx)", 
-            value=active_config["local"].get("n_ctx", 4096), 
-            step=1024,
-            label_visibility="collapsed"
-        )
-        
-        st.caption("最大輸出 Token")
-        active_config["local"]["max_tokens"] = st.number_input(
-            "最大輸出 Token", 
-            value=active_config["local"].get("max_tokens", 1024), 
-            step=256,
-            label_visibility="collapsed"
-        )
-        
-        current_gpu_setting = active_config["local"].get("n_gpu_layers", -1)
-        use_gpu = st.checkbox("啟用 GPU 顯示卡加速 (若閃退請關閉)", value=(current_gpu_setting != 0))
-        active_config["local"]["n_gpu_layers"] = -1 if use_gpu else 0
-
-        st.divider()
-        st.subheader("🦙 Ollama 伺服器設定")
-        active_config["ollama"]["model_name"] = st.text_input(
-            "Ollama 模型名稱 (例如: llama3.1)", 
-            value=active_config["ollama"].get("model_name", "llama3.1")
-        )
-        active_config["ollama"]["base_url"] = st.text_input(
-            "Ollama 伺服器網址", 
-            value=active_config["ollama"].get("base_url", "http://localhost:11434")
-        )
-
-        st.divider()
-        st.subheader("🌐 知識更新策略 (Knowledge Cutoff 解決方案)")
-        st.info("開啟後，代理人將在審查前自動獲取最新資訊，避免知識落後。可多選併行。")
-        
-        active_config["knowledge_update"]["enable_rag"] = st.checkbox(
-            "📚 策略一：啟用學術庫連線 (自動爬取 Arxiv 最新論文)", 
-            value=active_config["knowledge_update"].get("enable_rag", False)
-        )
-        active_config["knowledge_update"]["enable_web_search"] = st.checkbox(
-            "🌍 策略二：啟用代理人聯網搜尋 (自動搜尋最新網頁資訊)",
-            value=active_config["knowledge_update"].get("enable_web_search", False)
-        )
-        if active_config["knowledge_update"]["enable_web_search"]:
-            tavily_show = st.checkbox("顯示 Tavily Key", key="show_tavily_api")
-            active_config["knowledge_update"]["tavily_api_key"] = st.text_input(
-                "Tavily Search API Key (選填；留空則自動退回 Wikipedia 輕量搜尋)",
-                value=active_config["knowledge_update"].get("tavily_api_key", ""),
-                type="default" if tavily_show else "password",
-                autocomplete="new-password"
-            )
-        active_config["knowledge_update"]["enable_reference_upload"] = st.checkbox(
-            "📤 策略三：啟用動態參考文獻上傳 (由使用者手動補充)", 
-            value=active_config["knowledge_update"].get("enable_reference_upload", False)
-        )
-
-    st.divider()
-    if st.button("💾 儲存並套用設定", type="primary"):
-        save_global_config(active_config)
-        # 強制更新快取標記
-        st.session_state.force_reload_config = True
-        st.success("設定檔已成功更新！系統已同步最新參數。")
-        st.rerun()
+def _temporary_config(config: dict) -> str:
+    return config_service.write_temp_user_config(config)
 
 
-# ===========================================================
-# 分頁 2：推論主畫面 (論文分析與審查)
-# ===========================================================
-
-else:
-    if entry_mode == "💻 管理員 (單機推論)" and not is_admin:
-        ui_theme.hero("多代理人 AI 論文審查系統", "Multi-Agent Academic Paper Review Platform")
-        st.warning("🔒 請先於左側輸入系統管理員密碼以解鎖此區域。")
-        st.stop()
-
-    col_t1, col_t2 = st.columns([0.8, 0.2])
-    with col_t1:
-        ui_theme.hero(
-            "多代理人 AI 論文審查系統",
-            "三輪協作審查 · 動態知識擴充 · AI 寫作偵測",
-        )
-    with col_t2:
-        with st.popover("⚙️ 當前參數 (除錯專用)"):
-            st.json(active_config)
-            
-            st.divider()
-            st.markdown("**🐞 系統內部狀態**")
-            st.text(f"AI 偵測器模式: {active_config.get('ai_detector', {}).get('mode', '未知')}")
-            st.text(f"LLM 推論模式: {active_config.get('llm_mode', '未知')}")
-
-    # 資源監控與狀態列
-    c1, c2 = st.columns([0.3, 0.7])
-    with c1:
-        st.markdown(
-            f"目前推論模式&ensp;{ui_theme.badge(active_config.get('llm_mode', 'mock'))}",
-            unsafe_allow_html=True,
-        )
-    with c2: 
-        if st.button("🔍 檢測推論硬體狀態", help="檢測底層神經網路與 LLM 引擎狀態", use_container_width=True):
-            with st.spinner("正在檢測硬體資源..."):
-                det = AIDetector(config_path=active_config_path)
-                llm_inf = LLMInterface(config_path=active_config_path)
-                
-                llm_mode = active_config.get("llm_mode", "mock")
-                if llm_mode == "cloud": 
-                    provider = active_config.get("cloud", {}).get("provider", "openai")
-                    llm_hw_status = "☁️ Cloud API (Gemini)" if provider == "gemini" else "☁️ Cloud API (OpenAI 相容)"
-                elif llm_mode == "gemini_native":
-                    llm_hw_status = "✨ Google Gemini Native SDK"
-                elif llm_mode == "ollama": 
-                    llm_hw_status = "🦙 Ollama Server (高併發)"
-                elif llm_mode == "local":
-                    n_gpu = active_config.get("local", {}).get("n_gpu_layers", 0)
-                    if n_gpu != 0:
-                        llm_hw_status = f"💻 GPU (Offloaded {n_gpu} layers)"
-                    else:
-                        llm_hw_status = "💻 CPU"
-                else: 
-                    llm_hw_status = "🛠️ Mock Engine"
-                    
-                st.success(f"✔️ **檢測完成！**\n\n🔹 **LLM 推論**： {llm_hw_status}\n\n🔹 **AI 偵測**： {det.hardware_info}")
-
-    # ==========================================
-    # 🚨 智慧防呆：偵測本地模型路徑錯誤
-    # ==========================================
-    current_llm_mode = active_config.get("llm_mode", "mock")
-    current_det_mode = active_config.get("ai_detector", {}).get("mode", "hf_model")
-    current_model_path = active_config.get("local", {}).get("model_path", "")
-    
-    if (current_llm_mode == "local" or current_det_mode == "local") and not check_model_exists(current_model_path):
-        st.error(
-            f"🚨 **嚴重路徑錯誤**：系統偵測到您的本地 GGUF 模型路徑無效或不存在！\n\n"
-            f"目前系統讀取到的路徑為：`{current_model_path}`\n\n"
-            f"👉 **解決方案**：請至左側切換為「⚙️ 管理員 (參數設定)」，"
-            f"將路徑修改為 Linux 伺服器上的絕對路徑（例如：`/home/wangs/PaperReviewMultiSystem/local_models/...`）並儲存，否則本地推論將被強制降級為模擬模式。"
-        )
-
-    # ==========================================
-    # 1. 論文資料設定
-    # ==========================================
-    ui_theme.section_header("1", "論文資料設定", "上傳檔案或直接貼上待審查的論文內容")
-    
-    col_title, col_field = st.columns(2)
-    with col_title:
-        paper_title = st.text_input("論文標題", placeholder="請輸入論文標題...")
-    with col_field:
-        paper_field = st.text_input("主題領域", placeholder="例如：電腦視覺、人工智慧")
-
-    # Ensure state variables exist
-    if "paper_content_text_area" not in st.session_state:
-        st.session_state.paper_content_text_area = ""
-    if "last_uploaded_file" not in st.session_state:
-        st.session_state.last_uploaded_file = None
-
-    uploaded_file = st.file_uploader("上傳論文檔案 (.txt, .pdf, .docx)", type=["txt", "pdf", "docx"])
-    
-    if uploaded_file is not None:
-        # Only parse if it's a newly uploaded file
-        if st.session_state.last_uploaded_file != uploaded_file.name:
-            with st.spinner("正在解析檔案內容..."):
-                try:
-                    parsed_content = extract_text_from_file(uploaded_file)
-                    if parsed_content.strip():
-                        st.session_state.paper_content_text_area = parsed_content
-                        st.session_state.last_uploaded_file = uploaded_file.name
-                        st.session_state.ai_report = None
-                        st.success(f"檔案「{uploaded_file.name}」解析成功！")
-                    else:
-                        st.warning("檔案解析完成，但未偵測到有效文字。")
-                except Exception as e:
-                    st.error(f"解析失敗：{e}")
+def _reviewers_from_table(rows) -> list[ReviewerAgent]:
+    reviewers = []
+    # Gradio 6 returns a pandas.DataFrame.  Evaluating a DataFrame as a bool
+    # (``rows or []``) raises: "The truth value of a DataFrame is ambiguous".
+    if rows is None:
+        normalized_rows = []
+    elif hasattr(rows, "itertuples"):
+        normalized_rows = rows.fillna("").itertuples(index=False, name=None)
+    elif isinstance(rows, dict):
+        normalized_rows = zip(*rows.values()) if rows else []
     else:
-        # If the file was cleared by the user, clear the state
-        if st.session_state.last_uploaded_file is not None:
-            st.session_state.paper_content_text_area = ""
-            st.session_state.last_uploaded_file = None
-            st.session_state.ai_report = None
-            
-    paper_content_input = st.text_area("或直接貼上/編輯論文內容", key="paper_content_text_area", height=200)
-    raw_paper_content = paper_content_input
+        normalized_rows = rows
 
-    # ==========================================
-    # 1.2 補充最新參考文獻 (策略三：知識截斷解決方案)
-    # ==========================================
-    knowledge_config = active_config.get("knowledge_update", {})
-    if knowledge_config.get("enable_reference_upload"):
-        ui_theme.section_header("1.2", "補充最新參考文獻", "動態注入領域新知，解決模型知識落差")
-        st.info("💡 系統已開啟「動態參考文獻」功能。您可以上傳本領域最新的文獻 (支援多檔)，系統將自動解析並作為背景知識提供給代理人。")
-        
-        ref_files = st.file_uploader(
-            "上傳參考文獻 (.txt, .pdf, .docx) - 可複選", 
-            type=["txt", "pdf", "docx"], 
-            accept_multiple_files=True, 
-            key="ref_uploader"
+    for row in normalized_rows:
+        values = list(row) + ["", "", "", ""]
+        name, expertise, focus, style = [str(value or "").strip() for value in values[:4]]
+        if name:
+            reviewers.append(ReviewerAgent(name, expertise, focus, style))
+    if not reviewers:
+        raise gr.Error("請至少設定一位審查委員。")
+    return reviewers
+
+
+def _openai_models_url(api_url: str) -> str:
+    """Convert a chat-completions endpoint to its OpenAI-compatible models URL."""
+    url = (api_url or "https://api.openai.com/v1/chat/completions").strip().rstrip("/")
+    for suffix in ("/chat/completions", "/responses", "/completions"):
+        if url.endswith(suffix):
+            return url[: -len(suffix)] + "/models"
+    return url if url.endswith("/models") else url + "/models"
+
+
+def _ollama_api_url(base_url: str, path: str) -> str:
+    """Build an Ollama native API URL from a public HTTPS base URL."""
+    base = (base_url or "").strip().rstrip("/")
+    if base.endswith("/api"):
+        base = base[:-4]
+    return f"{base}/api/{path.lstrip('/')}"
+
+
+def _auth_headers(api_key: str) -> dict:
+    token = (api_key or "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def provider_defaults(provider: str):
+    if provider == "Gemini":
+        choices = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
+        return gr.Dropdown(choices=choices, value=choices[0], allow_custom_value=True), gr.Textbox(value="https://api.openai.com/v1/chat/completions", visible=False)
+    if provider == "OpenAI 相容 API":
+        choices = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"]
+        return gr.Dropdown(choices=choices, value=choices[0], allow_custom_value=True), gr.Textbox(value="https://api.openai.com/v1/chat/completions", visible=True)
+    if provider == "Ollama 遠端服務":
+        choices = ["gemma3:latest", "llama3.1:latest", "qwen3:latest"]
+        return gr.Dropdown(choices=choices, value=choices[0], allow_custom_value=True), gr.Textbox(value="https://your-ollama.example.com", visible=True)
+    return gr.Dropdown(choices=["mock"], value="mock", allow_custom_value=True), gr.Textbox(value="https://api.openai.com/v1/chat/completions", visible=False)
+
+
+def provider_help(provider: str) -> str:
+    if provider == "Ollama 遠端服務":
+        return (
+            "請填入可從網際網路存取的 Ollama HTTPS Base URL，然後按下方按鈕。"
+            "系統會測試 `/api/tags`、顯示模型明細，並更新模型下拉選單。"
         )
-        
-        if ref_files:
-            ref_names = [rf.name for rf in ref_files]
-            if "last_ref_files" not in st.session_state or st.session_state.last_ref_files != ref_names:
-                with st.spinner("正在解析參考文獻..."):
-                    combined_refs = ""
-                    success_count = 0
-                    for rf in ref_files:
-                        try:
-                            extracted = extract_text_from_file(rf)
-                            if extracted.strip():
-                                combined_refs += f"【參考文獻：{rf.name}】\n{extracted}\n\n"
-                                success_count += 1
-                        except Exception as e:
-                            st.error(f"解析 {rf.name} 失敗：{e}")
-                    
-                    st.session_state.reference_content = combined_refs
-                    st.session_state.last_ref_files = ref_names
-                    if success_count > 0:
-                        st.success(f"✅ 成功載入 {success_count} 篇參考文獻至背景知識庫！")
+    if provider == "模擬模式":
+        return "模擬模式不需要 API Key 或遠端模型。"
+    return "輸入 API Key 後可自動取得模型清單。"
+
+
+def detect_available_models(provider: str, api_key: str, api_url: str):
+    """Validate the API key and populate the model dropdown."""
+    if provider == "模擬模式":
+        return gr.Dropdown(choices=["mock"], value="mock", allow_custom_value=True), "✅ 模擬模式不需要 API Key。"
+    if provider != "Ollama 遠端服務" and not (api_key or "").strip():
+        raise gr.Error("請先輸入 API Key。")
+
+    try:
+        model_details = []
+        if provider == "Gemini":
+            response = requests.get(
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                params={"key": api_key.strip(), "pageSize": 1000},
+                timeout=20,
+            )
+            response.raise_for_status()
+            models = []
+            for item in response.json().get("models", []):
+                methods = item.get("supportedGenerationMethods", [])
+                if "generateContent" in methods:
+                    models.append(item.get("name", "").removeprefix("models/"))
+        elif provider == "OpenAI 相容 API":
+            response = requests.get(
+                _openai_models_url(api_url),
+                headers={"Authorization": f"Bearer {api_key.strip()}"},
+                timeout=20,
+            )
+            response.raise_for_status()
+            models = [str(item.get("id", "")).strip() for item in response.json().get("data", [])]
         else:
-            if "reference_content" in st.session_state and st.session_state.reference_content != "":
-                st.session_state.reference_content = ""
-                st.session_state.last_ref_files = []
+            if not (api_url or "").strip().lower().startswith("https://"):
+                raise ValueError("Hugging Face Space 請使用 HTTPS Ollama URL；localhost 與 11434 無法由雲端直接存取。")
+            if "your-ollama.example.com" in (api_url or "").lower():
+                raise ValueError("目前仍是範例網址。請改填 Cloudflare Tunnel 或反向代理實際產生的 HTTPS URL。")
+            response = requests.get(
+                _ollama_api_url(api_url, "tags"),
+                headers=_auth_headers(api_key),
+                timeout=20,
+            )
+            response.raise_for_status()
+            ollama_models = response.json().get("models", [])
+            models = [str(item.get("name", "")).strip() for item in ollama_models]
+            for item in ollama_models:
+                details = item.get("details", {}) or {}
+                size = int(item.get("size", 0) or 0)
+                model_details.append({
+                    "name": str(item.get("name", "")).strip(),
+                    "size": f"{size / (1024 ** 3):.2f} GB" if size else "未知",
+                    "family": details.get("family") or details.get("format") or "未知",
+                    "quantization": details.get("quantization_level") or "未知",
+                })
+
+        models = sorted({model for model in models if model}, key=str.lower)
+        if not models:
+            raise ValueError("API 回應成功，但沒有可用模型。您仍可手動輸入模型名稱。")
+        preferred = next((m for m in models if "flash" in m.lower()), models[0])
+        if provider == "Ollama 遠端服務":
+            rows = ["| 模型 | 大小 | 家族/格式 | 量化 |", "|---|---:|---|---|"]
+            for detail in model_details:
+                rows.append(
+                    f"| `{detail['name']}` | {detail['size']} | {detail['family']} | {detail['quantization']} |"
+                )
+            status = (
+                f"✅ Ollama 連線成功：`{(api_url or '').rstrip('/')}`  "
+                f"\n共找到 **{len(models)}** 個可用模型。\n\n" + "\n".join(rows)
+            )
+        else:
+            status = f"✅ API Key 驗證成功，共找到 {len(models)} 個可用模型。"
+        return gr.Dropdown(choices=models, value=preferred, allow_custom_value=True), status
+    except requests.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.response.json().get("error", {}).get("message", "")
+        except Exception:
+            detail = exc.response.text[:300] if exc.response is not None else ""
+        raise gr.Error(f"模型偵測失敗（HTTP {exc.response.status_code}）：{detail or exc}") from exc
+    except Exception as exc:
+        raise gr.Error(f"模型偵測失敗：{exc}") from exc
 
 
-    # ==========================================
-    # 1.5 內容預處理與範圍界定
-    # ==========================================
-    ui_theme.section_header("1.5", "內容預處理與清洗", "排除參考文獻、引用與指定字串，控制審查範圍")
-    
-    total_words = len(raw_paper_content)
-    filtered_text = raw_paper_content
+def _round_markdown(title: str, entries: dict) -> str:
+    parts = [f"## {title}"]
+    for name, content in entries.items():
+        parts.append(f"### {name}\n\n{content}")
+    return "\n\n".join(parts)
 
-    col_set1, col_set2 = st.columns([0.5, 0.5])
-    
-    with col_set1:
-        exclude_quotes = st.checkbox("排除引用文字", value=True)
-        
-        if st.button("套用參考文獻截斷"):
-            st.session_state.exclusion_keywords = "Bibliography\nReferences\nAppendix\n參考文獻\n附錄"
-            st.rerun()
-            
-        exclusion_keywords = st.text_area(
-            "截斷關鍵字", 
-            value=st.session_state.exclusion_keywords,
-            height=100
-        )
-        st.session_state.exclusion_keywords = exclusion_keywords
-        
-        st.markdown("##### 📝 手動新增欲排除的特定字串")
-        
-        c_m1, c_m2 = st.columns([0.7, 0.3])
-        with c_m1:
-            manual_exclude_input = st.text_input("貼入欲排除句子：", key="manual_exclude_input", label_visibility="collapsed")
-        with c_m2:
-            if st.button("加入排除"):
-                if manual_exclude_input and manual_exclude_input not in st.session_state.manual_exclusions:
-                    st.session_state.manual_exclusions.append(manual_exclude_input)
-                    st.rerun()
-                    
-        if st.session_state.manual_exclusions:
-            for i, me in enumerate(st.session_state.manual_exclusions):
-                c_i1, c_i2 = st.columns([0.9, 0.1])
-                c_i1.code(me[:50] + "..." if len(me) > 50 else me) 
-                if c_i2.button("🗑️", key=f"del_me_{i}"):
-                    st.session_state.manual_exclusions.pop(i)
-                    st.rerun()
 
-    # --- 執行文字過濾邏輯 (詳見 services/file_service.py) ---
-    filtered_text = apply_text_filters(
-        filtered_text,
-        manual_exclusions=st.session_state.manual_exclusions,
-        exclude_quotes=exclude_quotes,
-        exclusion_keywords=exclusion_keywords,
+def _report_file(title: str, history: dict, stats: dict) -> str:
+    safe_title = "".join(c for c in title if c.isalnum() or c in "-_ ").strip() or "paper_review"
+    fd, path = tempfile.mkstemp(prefix="paper_review_", suffix=".md")
+    with os.fdopen(fd, "w", encoding="utf-8") as file:
+        file.write(f"# {safe_title}：多代理人審查報告\n\n")
+        file.write("## 評分\n\n")
+        file.write(json.dumps(stats, ensure_ascii=False, indent=2))
+        for key, label in (("round_1", "第一輪：獨立審查"), ("round_2", "第二輪：交叉辯論"), ("round_3", "第三輪：最終裁決")):
+            file.write("\n\n" + _round_markdown(label, history.get(key, {})))
+    return path
+
+
+def run_review(
+    title, field, content, references, exclude_quotes, exclusion_keywords,
+    manual_exclusions, reviewer_rows, provider, api_key, model_name, api_url,
+    enable_rag, enable_web, enable_references, tavily_key,
+):
+    if not (title or "").strip():
+        raise gr.Error("請輸入論文標題。")
+    filtered = apply_text_filters(
+        content or "",
+        manual_exclusions=[line for line in (manual_exclusions or "").splitlines() if line.strip()],
+        exclude_quotes=bool(exclude_quotes),
+        exclusion_keywords=exclusion_keywords or "",
     )
+    if not filtered.strip():
+        raise gr.Error("請上傳論文或貼上論文內容。")
+    config = _build_config(
+        provider, api_key, model_name, api_url, "模擬偵測", "", "",
+        enable_rag, enable_web, enable_references, tavily_key,
+    )
+    if config["llm_mode"] == "cloud" and not config["cloud"]["api_key"]:
+        raise gr.Error("請輸入所選推論服務的 API Key。")
+    if config["llm_mode"] == "ollama" and not config["ollama"]["host"].lower().startswith("https://"):
+        raise gr.Error("雲端 Space 只能連線至 HTTPS Ollama URL，不能使用 localhost:11434。")
 
-    compared_words = len(filtered_text)
-    excluded_words = total_words - compared_words
-
-    with col_set2:
-        st.markdown(
-            ui_theme.stat_card("文件原始總字數", total_words)
-            + ui_theme.stat_card("總計排除字數", excluded_words, kind="danger")
-            + ui_theme.stat_card("最終比對／審查字數", compared_words, kind="success"),
-            unsafe_allow_html=True,
-        )
-
-        if compared_words > 30000:
-            st.warning("⚠️ 注意：最終比對字數超過 30,000 字，可能因超過 Token 限制而報錯，建議進一步精簡。")
-
-    st.markdown("##### 🔍 內容預覽 (分析前檢視您的文件)")
-    preview_limit = 1000
-    display_text = filtered_text[:preview_limit] + ("\n\n... (內容已截斷，僅顯示前 1000 字)" if len(filtered_text) > preview_limit else "")
-    st.info(display_text if display_text else "尚無內容。")
-
-    final_paper_content_for_llm = filtered_text
-
-
-    # ==========================================
-    # 2. AI 寫作偵測
-    # ==========================================
-    ui_theme.section_header("2", "AI 寫作偵測", "逐句分析 AI 生成嫌疑，輸出比例與熱力標記")
-    
-    current_det_mode = active_config.get("ai_detector", {}).get("mode", "hf_model")
-    
-    if current_det_mode == "hf_model" and is_admin:
-        st.caption("💡 提示：Hugging Face 模式初次執行時，會從網路下載神經網路模型至伺服器。如果您的 Linux 網路受阻或連線逾時，系統會自動啟動保護機制，降級為本地模擬模式。")
-    
-    col_btn1, col_btn2 = st.columns([0.2, 0.8])
-    with col_btn1:
-        execute_btn = st.button("執行分析", icon="🔎", type="primary")
-    with col_btn2:
-        clear_btn = st.button("🧼 清除分析結果")
-        
-    if clear_btn:
-        st.session_state.ai_report = None
-        st.rerun()
-
-    if execute_btn:
-        if not final_paper_content_for_llm.strip():
-            st.warning("請先輸入或上傳論文內容！")
-        else:
-            llm_service = LLMInterface(config_path=active_config_path)
-            detector = AIDetector(config_path=active_config_path)
-            with st.spinner("AI 偵測分析中 (若是初次運行 Hugging Face 模型，可能需要較長下載時間，請耐心等候)..."):
-                 report = detector.analyze(final_paper_content_for_llm, llm_interface=llm_service)
-                 st.session_state.ai_report = report
-                 st.success("分析完成！")
-
-    if st.session_state.ai_report:
-        report = st.session_state.ai_report
-        
-        if "模擬" in report.get('model_name', ''):
-            st.error(
-                "🚨 **系統已觸發底層安全降級機制 (Fail-safe)** 🚨\n\n"
-                "系統無法啟動您指定的 AI 偵測引擎，為避免程式崩潰，已自動連鎖降級為模擬模式。\n\n"
-                "**🔍 常見除錯方向 (Linux 環境)：**\n"
-                "1. **Hugging Face 失敗**：伺服器可能無法連上 Hugging Face，或 `~/.cache/huggingface` 目錄無權限寫入。\n"
-                "2. **本地模型 (GGUF) 失敗**：伺服器實體記憶體 (RAM) 不足，或 Linux 未安裝 `gcc`/`g++` 導致 `llama-cpp` 無法啟動。\n"
-                "3. **雲端 API 失敗**：未填寫有效的 GPTZero API Key。\n\n"
-                "👉 **建議**：請查看伺服器終端機 (Terminal) 的詳細報錯日誌以鎖定具體原因。"
-            )
-            
-        if "notice" in report:
-            st.warning(f"⚠️ 注意：{report['notice']}")
-            
-        st.success(f"🤖 **推論模型：** {report.get('model_name', '未知模型')}")
-        st.subheader(f"📊 偵測報告 (AI 比例：{report['ai_ratio']}%)")
-        
-        if report.get("summary"):
-            st.info(f"📝 **分析摘要：** {report['summary']}")
-
-        highlighted_html = "<div class='prs-doc'>"
-        
-        found_ai = False
-        for seg in report['segments']:
-            if seg['type'] == 'AI':
-                found_ai = True
-                reason = seg.get('reason', 'AI 生成嫌疑')
-                highlighted_html += f"<span style='background-color:{seg['color']}; border-radius:3px; cursor:help; margin-right:2px;' title='{reason}'>{seg['text']}</span> "
-            else:
-                highlighted_html += f"<span>{seg['text']}</span> "
-                
-        highlighted_html += "</div>"
-        st.markdown(highlighted_html, unsafe_allow_html=True)
-        
-        if found_ai:
-            st.caption("💡 提示：將滑鼠移至紅色標記文字上可查看詳細判定理由。")
-        else:
-            st.caption("✅ 未偵測到明顯 AI 生成嫌疑句。")
-
-        with st.expander("📊 查看詳細偵測數據表格", expanded=False):
-            import pandas as pd
-            df_data = []
-            for seg in report['segments']:
-                df_data.append({
-                    "類型": "🤖 AI" if seg['type'] == 'AI' else "👤 人類",
-                    "機率": f"{seg.get('prob', 0)*100:.1f}%" if seg.get('prob') is not None else "-",
-                    "內容片段": seg['text'],
-                    "判定理由": seg.get('reason', '-')
-               })
-            if df_data:
-                st.dataframe(pd.DataFrame(df_data), use_container_width=True)
-
-        st.divider()
-
-        col_exp1, col_exp2 = st.columns(2)
-        with col_exp1:
-            json_report = json.dumps(report, indent=4, ensure_ascii=False)
-            st.download_button(
-                label="📥 匯出完整 JSON 報告",
-                data=json_report,
-                file_name=f"AI_Detector_Report_{paper_title if paper_title else 'Untitled'}.json",
-                mime="application/json",
-                key="json_download_btn"
-            )
-            
-        with col_exp2:
-            md_report = f"# AI 寫作偵測報告\n\n"
-            md_report += f"- **論文標題：** {paper_title if paper_title else '未命名'}\n"
-            md_report += f"- **推論模型：** {report.get('model_name', '未知')}\n"
-            md_report += f"- **AI 比例：** {report['ai_ratio']}%\n"
-            md_report += f"- **分析摘要：** {report.get('summary', '無')}\n\n"
-            md_report += "## 詳細分析\n\n"
-            for seg in report['segments']:
-                md_report += f"- [{seg['type']}] {seg['text']}\n"
-                if seg.get('reason'):
-                     md_report += f"  - *原因：{seg['reason']}*\n"
-            
-            st.download_button(
-                label="📄 匯出 Markdown 摘要",
-                data=md_report,
-                file_name=f"AI_Detector_Report_{paper_title if paper_title else 'Untitled'}.md",
-                mime="text/markdown",
-                key="md_download_btn"
-            )
-
-
-    # ==========================================
-    # 3. 審查委員配置
-    # ==========================================
-    ui_theme.section_header("3", "審查委員配置", "設定各代理人的專業領域與審查風格")
-    
-    with st.expander("➕ 管理審查委員", expanded=False):
-        for i, reviewer in enumerate(st.session_state.reviewers):
-            st.text(f"委員 {i+1}: {reviewer.name} ({reviewer.expertise})")
-        
-        with st.form("add_reviewer_form"):
-            r_name = st.text_input("委員名稱")
-            r_expertise = st.text_input("專業領域")
-            r_focus = st.text_input("研究重心")
-            r_style = st.text_input("學術審查風格")
-            
-            if st.form_submit_button("加入名單") and r_name and r_expertise:
-                st.session_state.reviewers.append(ReviewerAgent(r_name, r_expertise, r_focus, r_style))
-                st.rerun()
-
-
-    # ==========================================
-    # 4. 執行多代理人審查
-    # ==========================================
-    ui_theme.section_header("4", "執行多代理人學術審查", "獨立審查 → 交叉辯論 → 最終裁決")
-
-    async def run_review_process():
-        if not paper_title or not final_paper_content_for_llm.strip():
-            st.error("請提供論文標題與內容")
-            return
-
-        # 💡 將參考文獻帶入 Paper 物件
-        my_paper = Paper(
-            title=paper_title, 
-            field=paper_field, 
-            content=final_paper_content_for_llm,
-            references=st.session_state.get("reference_content", "")
-        )
-        llm_service = LLMInterface(config_path=active_config_path)
-        
-        # 💡 將策略開關傳遞給調度器
+    config_path = _temporary_config(config)
+    try:
+        paper = Paper(title.strip(), (field or "").strip(), filtered, references or "")
+        llm = LLMInterface(config_path=config_path)
         orchestrator = PaperReviewOrchestrator(
-            paper=my_paper, 
-            reviewers=st.session_state.reviewers, 
-            llm=llm_service,
-            knowledge_config=knowledge_config
+            paper, _reviewers_from_table(reviewer_rows), llm,
+            knowledge_config=config["knowledge_update"],
         )
-
-        st.divider()
-        st.subheader(f"審查進行中：{paper_title}")
-        
-        with st.status("第一輪：獨立深度審查 (含外部知識檢索)...", expanded=True) as s1:
-            await orchestrator.run_round_1()
-            s1.update(label="✅ 第一輪完成", state="complete")
-        
-        with st.status("第二輪：交叉辯論...", expanded=True) as s2:
-            await orchestrator.run_round_2()
-            s2.update(label="✅ 第二輪完成", state="complete")
-            
-        with st.status("第三輪：最終裁決...", expanded=True) as s3:
-            await orchestrator.run_round_3()
-            s3.update(label="✅ 第三輪完成", state="complete")
-        
-        # 安全取值，防止 JSON 崩潰
-        st.session_state.review_history = getattr(orchestrator, "history", {})
-        st.session_state.review_stats = getattr(orchestrator, "review_stats", {
-            "avg_contribution": 0.0,
-            "avg_deficiencies": 0.0,
-            "avg_robustness": 0.0
-        })
-        
-        st.balloons()
-        st.rerun()
-
-    btn_disabled = (not HAS_LLAMA_CPP and active_config.get("llm_mode") == "local")
-    if st.button("啟動多輪 AI 審查", type="primary", disabled=btn_disabled):
-        asyncio.run(run_review_process())
-
-
-    # ==========================================
-    # 5. 結果展示與匯出
-    # ==========================================
-    if st.session_state.review_history:
-        ui_theme.section_header("5", "審查結果與匯出", "三輪審查意見、量化評分與報告下載")
-        
-        if st.session_state.review_stats:
-            stats = st.session_state.review_stats
-            c1, c2, c3 = st.columns(3)
-            c1.metric("總體貢獻度", f"{stats.get('avg_contribution', 0)}/10")
-            c2.metric("主要缺陷密度", f"{stats.get('avg_deficiencies', 0)}/10", delta_color="inverse")
-            c3.metric("方法論強健度", f"{stats.get('avg_robustness', 0)}/10")
-            st.write("")
-        
-        export_text = f"# 論文審查報告：{paper_title}\n領域：{paper_field}\n\n"
-        for rnd in ["round_1", "round_2", "round_3"]:
-            title = "第一輪：獨立審查" if rnd=="round_1" else "第二輪：交叉辯論" if rnd=="round_2" else "第三輪：最終裁決"
-            export_text += f"## {title}\n"
-            for name, content in st.session_state.review_history[rnd].items():
-                export_text += f"### {name}\n{content}\n\n"
-        
-        st.download_button(
-            label="📥 下載完整 Markdown 報告",
-            data=export_text,
-            file_name=f"Review_Report_{paper_title}.md",
-            mime="text/markdown"
+        yield "⏳ 第一輪：獨立深度審查與外部知識檢索…", {}, "", "", "", None
+        round_1 = asyncio.run(orchestrator.run_round_1())
+        yield "⏳ 第二輪：審查委員交叉辯論…", {}, _round_markdown("第一輪：獨立審查", round_1), "", "", None
+        round_2 = asyncio.run(orchestrator.run_round_2())
+        yield "⏳ 第三輪：主席整合與最終裁決…", {}, _round_markdown("第一輪：獨立審查", round_1), _round_markdown("第二輪：交叉辯論", round_2), "", None
+        round_3 = asyncio.run(orchestrator.run_round_3())
+        history, stats = orchestrator.history, orchestrator.review_stats
+        yield (
+            "✅ 審查完成。", stats,
+            _round_markdown("第一輪：獨立審查", round_1),
+            _round_markdown("第二輪：交叉辯論", round_2),
+            _round_markdown("第三輪：最終裁決", round_3),
+            _report_file(title, history, stats),
         )
+    except gr.Error:
+        raise
+    except Exception as exc:
+        raise gr.Error(f"審查執行失敗：{exc}") from exc
+    finally:
+        try:
+            os.remove(config_path)
+        except OSError:
+            pass
 
-        for rnd_id, rnd_name in [("round_1", "第一輪意見 (獨立)"), ("round_2", "第二輪辯論"), ("round_3", "最終裁決")]:
-            with st.expander(rnd_name, expanded=(rnd_id == "round_3")):
-                for name, content in st.session_state.review_history[rnd_id].items():
-                    st.markdown(f"**{name}：**")
-                    st.write(content)
-                    st.divider()
+
+def _segments_html(report: dict) -> str:
+    blocks = []
+    for segment in report.get("segments", []):
+        text = html.escape(str(segment.get("text", "")))
+        color = segment.get("color", "transparent")
+        reason = html.escape(str(segment.get("reason", segment.get("type", ""))))
+        blocks.append(f'<span title="{reason}" style="background:{color};padding:2px;border-radius:3px">{text}</span>')
+    return '<div style="line-height:1.9;white-space:pre-wrap">' + "".join(blocks) + "</div>"
+
+
+@gpu_task
+def run_ai_detection(text, mode, api_key, api_url):
+    if not (text or "").strip():
+        raise gr.Error("請先貼上或載入要分析的文字。")
+    config = _build_config(
+        "模擬模式", "", "", "", mode, api_key, api_url,
+        False, False, False, "",
+    )
+    config_path = _temporary_config(config)
+    try:
+        from core.ai_detector import AIDetector
+        detector = AIDetector(config_path=config_path)
+        report = detector.analyze(text)
+        summary = {
+            "AI 比例 (%)": report.get("ai_ratio", 0),
+            "模型": report.get("model_name", "未知"),
+            "摘要": report.get("summary", report.get("notice", "")),
+        }
+        return summary, _segments_html(report)
+    except Exception as exc:
+        raise gr.Error(f"AI 偵測失敗：{exc}") from exc
+    finally:
+        try:
+            os.remove(config_path)
+        except OSError:
+            pass
+
+
+CSS = """
+.gradio-container {max-width: 1400px !important;}
+.hero {padding: 1.2rem 1.4rem; border-radius: 16px; background: linear-gradient(120deg,#eaf2ff,#f7edff); margin-bottom: 1rem;}
+.hero h1 {margin: 0; color: #173b64;}
+.muted {color: #64748b;}
+"""
+
+
+with gr.Blocks(title=APP_TITLE) as demo:
+    gr.HTML("<div class='hero'><h1>🎓 多代理人論文審查系統</h1><div class='muted'>Gradio / Hugging Face Spaces 版 · API Key 僅存於單次工作階段</div></div>")
+
+    with gr.Accordion("⚙️ 推論與知識設定", open=True):
+        with gr.Row():
+            provider = gr.Radio(["Gemini", "OpenAI 相容 API", "Ollama 遠端服務", "模擬模式"], value="Gemini", label="推論服務")
+            model_name = gr.Dropdown(
+                choices=["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+                value="gemini-2.5-flash", allow_custom_value=True,
+                label="模型名稱（可從偵測結果選擇或自行輸入）",
+            )
+        api_key = gr.Textbox(label="API Key / Ollama Access Token（Ollama 可選填）", type="password", placeholder="不會寫入儲存庫或永久磁碟")
+        with gr.Row():
+            detect_models_button = gr.Button("🔍 測試連線並顯示可用模型")
+            model_detection_status = gr.Markdown("輸入 API Key 後可自動取得模型清單。")
+        api_url = gr.Textbox(value="https://api.openai.com/v1/chat/completions", label="API Endpoint / Ollama HTTPS Base URL", visible=False)
+        provider.change(provider_defaults, provider, [model_name, api_url])
+        provider.change(provider_help, provider, model_detection_status)
+        detect_models_button.click(
+            detect_available_models,
+            [provider, api_key, api_url],
+            [model_name, model_detection_status],
+        )
+        with gr.Row():
+            enable_rag = gr.Checkbox(value=True, label="Arxiv 最新文獻")
+            enable_web = gr.Checkbox(value=False, label="聯網搜尋")
+            enable_references = gr.Checkbox(value=True, label="使用上傳參考文獻")
+        tavily_key = gr.Textbox(label="Tavily API Key（選填）", type="password")
+
+    with gr.Tabs():
+        with gr.Tab("📝 多代理人審查"):
+            with gr.Row():
+                title = gr.Textbox(label="論文標題")
+                field = gr.Textbox(label="主題領域", placeholder="例如：電腦視覺、人工智慧")
+            paper_file = gr.File(label="上傳論文（TXT / PDF / DOCX）", file_types=[".txt", ".pdf", ".docx"], type="filepath")
+            paper_status = gr.Markdown("尚未上傳檔案。")
+            content = gr.Textbox(label="論文內容（可直接編輯）", lines=16)
+            paper_file.change(parse_paper_file, paper_file, [content, paper_status])
+
+            with gr.Accordion("內容清理", open=False):
+                exclude_quotes = gr.Checkbox(value=False, label="排除引號內文字")
+                exclusion_keywords = gr.Textbox(label="遇到以下章節標題時截斷（每行一項）", value="Bibliography\nReferences\n參考文獻")
+                manual_exclusions = gr.Textbox(label="移除特定字串（每行一項）", lines=3)
+
+            reference_files = gr.File(label="補充參考文獻（可多選）", file_types=[".txt", ".pdf", ".docx"], file_count="multiple", type="filepath")
+            reference_status = gr.Markdown("未加入參考文獻。")
+            references = gr.Textbox(label="參考文獻解析內容", lines=6, visible=False)
+            reference_files.change(parse_reference_files, reference_files, [references, reference_status])
+
+            reviewers = gr.Dataframe(
+                headers=["委員名稱", "專業領域", "研究重心", "審查風格"],
+                value=DEFAULT_REVIEWERS, row_count=(2, "dynamic"), column_count=(4, "fixed"),
+                datatype=["str", "str", "str", "str"], label="審查委員（可新增或刪除列）",
+            )
+            review_button = gr.Button("🚀 啟動三輪 AI 審查", variant="primary")
+            review_status = gr.Markdown()
+            score_output = gr.JSON(label="最終評分")
+            with gr.Tabs():
+                with gr.Tab("第一輪"):
+                    round_1_output = gr.Markdown()
+                with gr.Tab("第二輪"):
+                    round_2_output = gr.Markdown()
+                with gr.Tab("最終裁決"):
+                    round_3_output = gr.Markdown()
+            report_download = gr.File(label="下載完整 Markdown 報告")
+            review_button.click(
+                run_review,
+                inputs=[title, field, content, references, exclude_quotes, exclusion_keywords,
+                        manual_exclusions, reviewers, provider, api_key, model_name, api_url,
+                        enable_rag, enable_web, enable_references, tavily_key],
+                outputs=[review_status, score_output, round_1_output, round_2_output, round_3_output, report_download],
+                concurrency_limit=2,
+            )
+
+        with gr.Tab("🔍 AI 文字偵測"):
+            detector_file = gr.File(
+                label="上傳待偵測論文（TXT / PDF / DOCX）",
+                file_types=[".txt", ".pdf", ".docx"], type="filepath",
+            )
+            detector_file_status = gr.Markdown("可上傳論文，或直接在下方貼上文字。")
+            detector_text = gr.Textbox(label="待分析文字", lines=16)
+            detector_file.change(parse_paper_file, detector_file, [detector_text, detector_file_status])
+            with gr.Row():
+                detector_mode = gr.Radio(["ZeroGPU 模型", "GPTZero API", "模擬偵測"], value="模擬偵測", label="偵測方式")
+                detector_key = gr.Textbox(label="GPTZero API Key", type="password")
+            detector_url = gr.Textbox(value="https://api.gptzero.me/v2/predict/text", label="GPTZero Endpoint")
+            detector_button = gr.Button("🔎 執行 AI 偵測", variant="primary")
+            detector_summary = gr.JSON(label="偵測結果")
+            detector_highlight = gr.HTML(label="逐句分析")
+            detector_button.click(
+                run_ai_detection,
+                [detector_text, detector_mode, detector_key, detector_url],
+                [detector_summary, detector_highlight],
+                concurrency_limit=1,
+            )
+
+        with gr.Tab("ℹ️ 使用說明"):
+            gr.Markdown("""
+### 使用方式
+
+1. 選擇 Gemini 或 OpenAI 相容服務，輸入自己的 API Key 與模型名稱。
+2. 上傳 TXT、PDF 或 DOCX 論文，也可以直接貼上文字。
+3. 調整審查委員角色後啟動三輪審查。
+4. AI 文字偵測可使用 ZeroGPU 模型、GPTZero，或不耗用配額的模擬模式。
+
+API Key 只會寫入單次請求使用的臨時檔案，請求結束後立即刪除。免費 Space 不提供 Ollama 或 GGUF 本機模型服務。
+
+Ollama 模式必須填入可由網際網路存取的 HTTPS URL（例如受 Cloudflare Access 或反向代理保護的端點）。請勿直接公開未驗證的 `11434` 連接埠。
+""")
+
+
+if __name__ == "__main__":
+    demo.queue(default_concurrency_limit=2, max_size=20).launch(css=CSS)

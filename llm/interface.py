@@ -253,8 +253,11 @@ class LLMInterface:
     def _generate_ollama_sync(self, system_prompt: str, user_prompt: str) -> str:
         """ 透過 Ollama API 進行推論 """
         ollama_config = self.config.get("ollama", {})
-        host = ollama_config.get("host", "http://localhost:11434")
+        host = ollama_config.get("host") or ollama_config.get("base_url", "http://localhost:11434")
+        host = host.rstrip("/")
         model = ollama_config.get("model_name", "llama3.1")
+        api_key = ollama_config.get("api_key", "").strip()
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         
         payload = {
             "model": model,
@@ -266,11 +269,17 @@ class LLMInterface:
             "options": {
                 "temperature": 0.2,
                 "num_predict": ollama_config.get("max_tokens", 4096)
-            }
+            },
+            "keep_alive": ollama_config.get("keep_alive", "30m"),
         }
         
         try:
-            response = requests.post(f"{host}/api/chat", json=payload, timeout=120)
+            response = requests.post(
+                f"{host}/api/chat",
+                headers=headers,
+                json=payload,
+                timeout=int(ollama_config.get("timeout", 300)),
+            )
             response.raise_for_status()
             data = response.json()
             return data.get("message", {}).get("content", "").strip()

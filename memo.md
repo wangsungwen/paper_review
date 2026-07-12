@@ -413,3 +413,339 @@ Ran 3 commands
 新功能：OpenAI 相容模型偵測（比照 Gemini 體驗）已加到兩處——「管理員（參數設定）」的 OpenAI-Compatible 區塊，以及「線上使用者」側邊欄的 OpenAI 相容引擎。點「🔍 偵測可用模型」會以你的 API Key 呼叫該端點的 /models API（自動從 chat endpoint 推導，OpenAI／DeepSeek／Groq／OpenRouter 都適用），成功後出現下拉選單，選取即套用，也可維持手動輸入。
 
 另外兩件事：你目前是用 streamlit_app.py 啟動的（app.py 的複本），這次已把兩支檔案同步並一起納入版控，之後我改任一邊都會保持一致；還注意到你的 git 設定多了一個指向 HuggingFace 的 remote——若打算推上 HF Space，請確認 config.json（含金鑰）沒有被包含在推送內容中（目前它已被 .gitignore 排除，維持現狀即安全）。
+
+hugging face space 部署雲端 可以選用 ollama 本地高併發作為推論引擎嗎
+
+下午4:16
+
+適用於 1m 6s
+
+可以，但 Hugging Face Space 不能直接連線到你電腦的 <http://localhost:11434。>
+因為 Space 裡的 localhost 是 Hugging Face 的雲端容器，不是你的本機；而且 Space 對外連線只允許 80、443、8080，Ollama 預設的 11434 也會被擋住。Hugging Face 網路限制
+可行架構是：
+Hugging Face Gradio Space
+        │ HTTPS / 443
+        ▼
+Cloudflare Tunnel 或 Nginx
+        │ localhost:11434
+        ▼
+你本機的 Ollama + GPU
+Ollama 官方支援透過 Nginx、ngrok 或 Cloudflare Tunnel公開服務。Ollama FAQ
+例如本機先確認 Ollama：
+ollama serve
+ollama list
+
+# 測試 API
+
+Invoke-RestMethod `
+-Uri "http://localhost:11434/api/tags" `
+  -Method Get
+再用 Cloudflare Tunnel建立 HTTPS入口：
+cloudflared tunnel --url <http://localhost:11434> `
+  --http-host-header="localhost:11434"
+它會產生類似：
+<https://example-name.trycloudflare.com>
+Space 便可呼叫：
+import requests
+
+response = requests.post(
+    "<https://example-name.trycloudflare.com/api/chat>",
+    json={
+        "model": "gemma3:12b",
+        "messages": [
+            {"role": "user", "content": "請審查這篇論文"}
+        ],
+        "stream": False,
+        "keep_alive": "30m",
+    },
+    timeout=300,
+)
+
+answer = response.json()["message"]["content"]
+不過，不能直接把未加保護的 Ollama 公開到網路。Ollama 本機 API 預設不要求驗證，任何取得網址的人都可能使用你的 GPU。Ollama驗證說明
+建議正式方案具備：
+HTTPS 網址，使用 443 連接。
+Cloudflare Access、反向代理 API Key 或其他驗證。
+限制 /api/chat、/api/tags 等必要路徑。
+設定請求大小、逾時和速率限制。
+不開放 /api/pull，避免外部任意下載模型。
+使用 OLLAMA_MAX_QUEUE 控制排隊數量。
+使用 keep_alive 保持模型載入，提高連續審查速度。
+目前 PaperReview 的 Gradio介面尚未提供 Ollama 選項；需要新增：
+「Ollama 遠端／本機伺服器」推論服務。
+Ollama HTTPS Base URL。
+存取 Token或自訂 Authorization Header。
+「測試連線並偵測模型」按鈕。
+從 /api/tags 取得模型下拉選單。
+連線逾時、佇列與錯誤提示。
+避免將 Ollama網址及 Token寫入公開儲存庫。
+結論：可以使用你本機的 Ollama 做高併發推論，但必須把它安全地代理成 Space 可連線的 HTTPS服務；不能直接填 localhost:11434。
+
+⚠️ 模型未輸出標準 JSON 格式，無法解析評分。
+原始輸出內容： 【Ollama 推論錯誤】：HTTPSConnectionPool(host='your-ollama.example.com', port=443): Max retries exceeded with url: /api/chat (Caused by NameResolutionError("HTTPSConnection(host='your-ollama.example.com', port=443): Failed to resolve 'your-ollama.example.com' ([Errno -5] No address associated with hostname)")) 請確認 Ollama 已啟動且已下載 'gemma3:latest' 模型。
+如果本地端未啟動或安裝ollama，可否主動啟動或下載安裝
+
+下午4:38
+
+不可以由 Hugging Face Space直接啟動或安裝你電腦上的 Ollama。
+原因是 Space 執行在 Hugging Face 雲端，無權操作你的 Windows、啟動本機程式或安裝軟體。錯誤中的：
+<https://your-ollama.example.com>
+只是範例網址，並不存在，所以發生 DNS 解析失敗。
+可行方案是提供一個「本機 Ollama 啟動助手」PowerShell腳本，由使用者在自己的 Windows 執行。它可以：
+檢查 Ollama 是否安裝。
+未安裝時提示或自動透過 winget 安裝。
+啟動 Ollama。
+下載指定模型，例如 gemma3:latest。
+測試 /api/tags 與 /api/chat。
+啟動 Cloudflare Tunnel。
+顯示應填入 PaperReview 的 HTTPS URL。
+基本流程例如：
+
+# 檢查 Ollama
+
+$ollama = Get-Command ollama -ErrorAction SilentlyContinue
+
+if (-not $ollama) {
+    Write-Host "未安裝 Ollama，開始安裝..."
+    winget install --id Ollama.Ollama --exact
+}
+
+# 啟動 Ollama
+
+Start-Process "ollama" `
+-ArgumentList "serve" `
+    -WindowStyle Hidden
+
+Start-Sleep -Seconds 5
+
+# 下載模型
+
+ollama pull gemma3:latest
+
+# 確認模型
+
+ollama list
+
+# 測試服務
+
+Invoke-RestMethod `
+    -Uri "<http://127.0.0.1:11434/api/tags>"
+
+# 建立臨時 HTTPS Tunnel
+
+cloudflared tunnel `
+--url http://localhost:11434 `
+    --http-host-header="localhost:11434"
+但正式使用時不建議直接使用無驗證的臨時 Tunnel，因為任何取得網址的人都可能使用你的 GPU。應改用 Cloudflare Named Tunnel + Access或具 Bearer Token驗證的反向代理。
+PaperReview 也應再增加兩項防呆：
+阻止使用 your-ollama.example.com 這類範例網址啟動審查。
+在審查前先呼叫 /api/tags，連線失敗就停止，不要進入三輪審查或顯示 JSON解析錯誤。
+建議下一步是在 D:\paper_review_hf_deploy 新增：
+可下載的 setup_ollama_windows.ps1。
+Gradio介面的「下載本機啟動助手」按鈕。
+Ollama連線前置檢查。
+更清楚的 DNS、401、404、Timeout錯誤訊息。
+阻擋範例 URL。
+
+但是目前我的主機端已啟動OLLAMA，為何HF SPACE 推論後出現：原始輸出內容： 【Ollama 推論錯誤】：HTTPSConnectionPool(host='your-ollama.example.com', port=443): Max retries exceeded with url: /api/chat (Caused by NameResolutionError("HTTPSConnection(host='your-ollama.example.com', port=443): Failed to resolve 'your-ollama.example.com' ([Errno -5] No address associated with hostname)")) 請確認 Ollama 已啟動且已下載 'qwen3:latest' 模型。
+
+因為 Hugging Face Space目前連線的不是你的主機，而是範例網址：
+<https://your-ollama.example.com>
+這個網域不存在，所以 DNS 解析失敗。錯誤發生在連到 Ollama之前，與你主機上的 Ollama是否啟動無關。
+正確連線流程如下。
+
+1. 先在 Ollama主機確認服務
+Invoke-RestMethod `
+  -Uri "<http://127.0.0.1:11434/api/tags>"
+確認結果包含：
+qwen3:latest
+如果沒有，請執行：
+ollama pull qwen3:latest
+ollama list
+2. 建立 Space可存取的 HTTPS Tunnel
+在 Ollama主機執行：
+cloudflared tunnel `
+--url http://localhost:11434 `
+  --http-host-header="localhost:11434"
+成功後會顯示類似：
+<https://random-name.trycloudflare.com>
+這個 PowerShell視窗必須持續開著；關閉後 Tunnel 就會中斷。
+3. 從外部測試 Tunnel
+另開一個 PowerShell：
+$ollamaUrl = "<https://random-name.trycloudflare.com>"
+
+Invoke-RestMethod `
+  -Uri "$ollamaUrl/api/tags"
+若能看到 qwen3:latest，表示 Hugging Face Space也能連線。
+4. 修改 PaperReview設定
+在 PaperReview介面設定：
+推論服務：
+Ollama 遠端服務
+
+API Endpoint / Ollama HTTPS Base URL：
+<https://random-name.trycloudflare.com>
+
+API Key / Ollama Access Token：
+留空（Quick Tunnel沒有驗證）
+
+模型：
+按「驗證 API Key 並偵測可用模型」後選擇 qwen3:latest
+不要填：
+<https://your-ollama.example.com>
+<http://localhost:11434>
+<http://你的區網IP:11434>
+其中 localhost 對 Space來說是 Hugging Face自己的容器，不是你的電腦；區網 IP也無法從網際網路存取。
+5. 再執行審查
+模型偵測成功後再啟動三輪審查。若仍失敗，可直接測試：
+$url = "<https://random-name.trycloudflare.com/api/chat>"
+
+$body = @{
+    model = "qwen3:latest"
+    messages = @(
+        @{
+            role = "user"
+            content = "請回覆連線成功"
+        }
+    )
+    stream = $false
+} | ConvertTo-Json -Depth 5
+
+Invoke-RestMethod `
+-Uri $url `
+  -Method Post `
+-ContentType "application/json" `
+  -Body $body
+目前問題的核心不是 Ollama未啟動，而是 PaperReview仍使用尚未替換的範例網域。請將它換成 cloudflared 實際產生的 HTTPS網址。
+
+可否UI的OLLAMA推論服務增加檢查模型及顯示可用模型功能
+
+已新增並部署至 PaperReview Space。
+Ollama推論服務現在提供：
+「測試連線並顯示可用模型」按鈕。
+
+呼叫 Ollama /api/tags 檢查連線。
+
+自動更新模型下拉選單。
+
+顯示每個模型的：
+模型名稱
+檔案大小
+模型家族／格式
+量化等級
+
+阻擋 your-ollama.example.com 範例網址。
+
+使用範例網址時會提示改填實際 Cloudflare Tunnel或反向代理網址。
+
+仍允許手動輸入完整模型名稱。
+
+驗證結果：
+模型明細表測試通過。
+範例 URL攔截測試通過。
+本機 Gradio回傳 HTTP 200。
+Space 狀態為 RUNNING。
+部署版本：f39e749。
+
+已編輯 app.py+40-6檢閱變更復原查看
+
+ollama HTTPS Base URL 是否為：<http://127.0.0.1:11434/>
+
+不是。在 Hugging Face Space中，Ollama HTTPS Base URL不能填：
+<http://127.0.0.1:11434/>
+因為這個位址只適用於 Ollama主機本機。Space 裡的 127.0.0.1 是 Hugging Face自己的容器，不是你的電腦，而且它也不是 HTTPS。
+你需要先在 Ollama主機執行：
+cloudflared tunnel `
+--url http://127.0.0.1:11434 `
+  --http-host-header="localhost:11434"
+取得類似：
+<https://random-name.trycloudflare.com>
+然後 PaperReview填寫：
+Ollama HTTPS Base URL:
+<https://random-name.trycloudflare.com>
+請不要加 /api/chat，程式會自動組合：
+<https://random-name.trycloudflare.com/api/tags>
+<https://random-name.trycloudflare.com/api/chat>
+而 <http://127.0.0.1:11434/> 只適合在 Ollama主機上測試：
+Invoke-RestMethod <http://127.0.0.1:11434/api/tags>
+
+(base) PS C:\Users\wangs> cloudflared tunnel --url <http://127.0.0.1:11434> --http-host-header="localhost:11434"
+cloudflared : 無法辨識 'cloudflared' 詞彙是否為 Cmdlet、函數、指令檔或可執行程式的名稱。請檢查名稱拼字是否正確，如果包
+含路徑的話，請確認路徑是否正確，然後再試一次。
+位於 線路:1 字元:1
+cloudflared tunnel --url <http://127.0.0.1:11434> --http-host-header="l ...
+
++ CategoryInfo          : ObjectNotFound: (cloudflared:String) [], CommandNotFoundException
+
+FullyQualifiedErrorId : CommandNotFoundException
+
+這個錯誤表示尚未安裝 cloudflared，或安裝後目前 PowerShell尚未重新載入 PATH。
+方法一：使用 winget 安裝
+以系統管理員身分開啟 PowerShell：
+
+# 搜尋可用套件
+
+winget search cloudflared
+
+# 安裝 Cloudflare Tunnel
+
+winget install --id Cloudflare.cloudflared --exact
+安裝完成後，關閉目前 PowerShell，重新開啟，再確認：
+cloudflared --version
+方法二：手動安裝
+前往 Cloudflare 官方下載頁，下載 Windows 64-bit MSI並安裝。
+安裝後重新開啟 PowerShell：
+Get-Command cloudflared
+cloudflared --version
+如果仍找不到，可搜尋執行檔：
+Get-ChildItem `
+-Path "C:\Program Files","C:\Program Files (x86)" `
+  -Filter "cloudflared.exe" `
+-Recurse `
+  -ErrorAction SilentlyContinue
+找到後也可以直接用完整路徑執行，例如：
+& "C:\Program Files\cloudflared\cloudflared.exe" --version
+確認 Ollama正常
+Invoke-RestMethod `
+-Uri "http://127.0.0.1:11434/api/tags"
+應該看到 qwen3:latest 等模型。
+建立臨時 Tunnel
+cloudflared tunnel `
+  --url <http://127.0.0.1:11434> `
+  --http-host-header="localhost:11434"
+成功後會顯示：
+<https://某個隨機名稱.trycloudflare.com>
+保持這個 PowerShell視窗開啟。
+測試 HTTPS網址
+另開 PowerShell：
+$ollamaUrl = "<https://某個隨機名稱.trycloudflare.com>"
+
+Invoke-RestMethod `
+  -Uri "$ollamaUrl/api/tags"
+若能看到模型清單，就把 $ollamaUrl 的實際值填入 PaperReview：
+推論服務：Ollama 遠端服務
+Ollama HTTPS Base URL：<https://某個隨機名稱.trycloudflare.com>
+Access Token：留空
+接著按「測試連線並顯示可用模型」。
+Quick Tunnel僅適合測試，網址在每次重啟後會改變，且沒有內建存取驗證。正式使用建議建立 Named Tunnel並加入 Cloudflare Access。Cloudflare Quick Tunnel說明
+
+以上Ollama作業程序，請納入"C:\Users\wangs\paper_review_system_multi\docs\GitHub_to_HuggingFace_Spaces_部署與維護操作手冊.docx"手冊
+
+"D:\paper_review_hf_deploy\docs\GitHub_to_HuggingFace_Spaces_部署與維護操作手冊.docx"這裡才是
+
+已一併修改並同步兩份手冊至 1.2 版，共 21 頁，且完成逐頁版面檢查。
+新增內容位於第 19–21 頁，包括：
+Windows 安裝 cloudflared
+winget 與 MSI 手動安裝方式
+PATH 與「無法辨識 cloudflared」排查
+Ollama 啟動、模型檢查及下載
+Cloudflare Quick Tunnel 建立
+HTTPS /api/tags 外部連線測試
+PaperReview UI 設定方式
+127.0.0.1、範例網址及 NameResolutionError 說明
+文件下載：
+[D 槽主要手冊](D:/paper_review_hf_deploy/docs/GitHub_to_HuggingFace_Spaces_部署與維護操作手冊.docx)
+[C 槽同步手冊](C:/Users/wangs/paper_review_system_multi/docs/GitHub_to_HuggingFace_Spaces_部署與維護操作手冊.docx)
+
+已編輯 update_manual_cloudflared.py+193-0檢閱變更復原查看
+
+02

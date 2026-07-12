@@ -281,6 +281,33 @@ with st.sidebar:
                 st.caption("輸入 OpenAI 模型名稱")
                 user_model = st.text_input("輸入 OpenAI 模型名稱", value="gpt-4o", label_visibility="collapsed")
                 st.session_state.user_config["cloud"]["model_name"] = user_model
+
+                # 偵測 OpenAI 相容端點的可用模型 (與 Gemini 相同體驗)
+                if st.button("🔍 偵測可用模型", key="online_openai_detect_btn"):
+                    if not user_key:
+                        st.error("請先填入您的 API Key！")
+                    else:
+                        with st.spinner("正在取得可用模型清單..."):
+                            llm_service = LLMInterface(config_path="config.json")
+                            result = llm_service.list_openai_models(
+                                user_key,
+                                st.session_state.user_config["cloud"].get(
+                                    "api_url", "https://api.openai.com/v1/chat/completions"
+                                ),
+                            )
+                        if isinstance(result, list):
+                            st.session_state["online_openai_models"] = result
+                            st.success(f"✅ 驗證成功！共偵測到 {len(result)} 個可用模型。")
+                        else:
+                            st.error(f"**金鑰無效或連線失敗：**\n\n{result}")
+                if st.session_state.get("online_openai_models"):
+                    picked = st.selectbox(
+                        "從偵測到的模型中選擇",
+                        ["(維持手動輸入)"] + st.session_state["online_openai_models"],
+                        key="online_openai_model_pick",
+                    )
+                    if picked != "(維持手動輸入)":
+                        st.session_state.user_config["cloud"]["model_name"] = picked
         
         # 綁定給後續推論流程使用
         active_config = st.session_state.user_config
@@ -425,6 +452,31 @@ if entry_mode == "⚙️ 管理員 (參數設定)":
 
             active_config["cloud"]["api_url"] = st.text_input("API 端點 (Endpoint)", value=current_api_url)
             active_config["cloud"]["model_name"] = st.text_input("模型名稱 (Model Name)", value=active_config["cloud"].get("model_name", "gpt-4o"))
+
+            # 偵測 OpenAI 相容端點的可用模型 (與 Gemini 相同體驗)
+            if st.button("🔍 偵測目前填入 API Key 可用的模型", key="admin_openai_detect_btn"):
+                admin_openai_key = active_config["cloud"].get("api_key", "")
+                if not admin_openai_key or "YOUR" in admin_openai_key:
+                    st.error("請先於下方填入有效的 API Key 並儲存 (或先填妥再點偵測)！")
+                else:
+                    with st.spinner("正在取得可用模型清單..."):
+                        llm_service = LLMInterface(config_path="config.json")
+                        result = llm_service.list_openai_models(
+                            admin_openai_key, active_config["cloud"].get("api_url", "")
+                        )
+                    if isinstance(result, list):
+                        st.session_state["admin_openai_models"] = result
+                        st.success(f"✅ 共偵測到 {len(result)} 個可用模型。")
+                    else:
+                        st.error(result)
+            if st.session_state.get("admin_openai_models"):
+                picked = st.selectbox(
+                    "從偵測到的模型中選擇",
+                    ["(維持手動輸入)"] + st.session_state["admin_openai_models"],
+                    key="admin_openai_model_pick",
+                )
+                if picked != "(維持手動輸入)":
+                    active_config["cloud"]["model_name"] = picked
             
         else:
             st.info("Gemini 模式將使用 Google Generative AI REST API。")

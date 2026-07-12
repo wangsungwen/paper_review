@@ -117,13 +117,30 @@ def _build_config(
     tavily_key: str,
 ) -> dict:
     config = copy.deepcopy(config_service.DEFAULT_CONFIG)
-    provider_code = {"Gemini": "gemini", "OpenAI 相容 API": "openai", "模擬模式": "mock"}[provider]
-    config["llm_mode"] = "mock" if provider_code == "mock" else "cloud"
+    provider_code = {
+        "Gemini": "gemini",
+        "OpenAI 相容 API": "openai",
+        "Ollama 遠端服務": "ollama",
+        "模擬模式": "mock",
+    }[provider]
+    if provider_code == "ollama":
+        config["llm_mode"] = "ollama"
+    else:
+        config["llm_mode"] = "mock" if provider_code == "mock" else "cloud"
     config["cloud"].update({
         "provider": provider_code,
         "api_key": (api_key or "").strip(),
         "model_name": (model_name or "").strip(),
         "api_url": (api_url or "").strip(),
+    })
+    config["ollama"].update({
+        "host": (api_url or "").strip().rstrip("/"),
+        "base_url": (api_url or "").strip().rstrip("/"),
+        "model_name": (model_name or "").strip(),
+        "api_key": (api_key or "").strip(),
+        "max_tokens": 4096,
+        "keep_alive": "30m",
+        "timeout": 300,
     })
     config["ai_detector"].update({
         # Cloud mode without a key intentionally falls back to the deterministic
@@ -178,6 +195,19 @@ def _openai_models_url(api_url: str) -> str:
     return url if url.endswith("/models") else url + "/models"
 
 
+def _ollama_api_url(base_url: str, path: str) -> str:
+    """Build an Ollama native API URL from a public HTTPS base URL."""
+    base = (base_url or "").strip().rstrip("/")
+    if base.endswith("/api"):
+        base = base[:-4]
+    return f"{base}/api/{path.lstrip('/')}"
+
+
+def _auth_headers(api_key: str) -> dict:
+    token = (api_key or "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 def provider_defaults(provider: str):
     if provider == "Gemini":
         choices = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
@@ -185,17 +215,32 @@ def provider_defaults(provider: str):
     if provider == "OpenAI 相容 API":
         choices = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"]
         return gr.Dropdown(choices=choices, value=choices[0], allow_custom_value=True), gr.Textbox(value="https://api.openai.com/v1/chat/completions", visible=True)
+    if provider == "Ollama 遠端服務":
+        choices = ["gemma3:latest", "llama3.1:latest", "qwen3:latest"]
+        return gr.Dropdown(choices=choices, value=choices[0], allow_custom_value=True), gr.Textbox(value="https://your-ollama.example.com", visible=True)
     return gr.Dropdown(choices=["mock"], value="mock", allow_custom_value=True), gr.Textbox(value="https://api.openai.com/v1/chat/completions", visible=False)
+
+
+def provider_help(provider: str) -> str:
+    if provider == "Ollama 遠端服務":
+        return (
+            "請填入可從網際網路存取的 Ollama HTTPS Base URL，然後按下方按鈕。"
+            "系統會測試 `/api/tags`、顯示模型明細，並更新模型下拉選單。"
+        )
+    if provider == "模擬模式":
+        return "模擬模式不需要 API Key 或遠端模型。"
+    return "輸入 API Key 後可自動取得模型清單。"
 
 
 def detect_available_models(provider: str, api_key: str, api_url: str):
     """Validate the API key and populate the model dropdown."""
     if provider == "模擬模式":
         return gr.Dropdown(choices=["mock"], value="mock", allow_custom_value=True), "✅ 模擬模式不需要 API Key。"
-    if not (api_key or "").strip():
+    if provider != "Ollama 遠端服務" and not (api_key or "").strip():
         raise gr.Error("請先輸入 API Key。")
 
     try:
+        model_details = []
         if provider == "Gemini":
             response = requests.get(
                 "https://generativelanguage.googleapis.com/v1beta/models",
@@ -208,7 +253,7 @@ def detect_available_models(provider: str, api_key: str, api_url: str):
                 methods = item.get("supportedGenerationMethods", [])
                 if "generateContent" in methods:
                     models.append(item.get("name", "").removeprefix("models/"))
-        else:
+        elif provider == "OpenAI 相容 API":
             response = requests.get(
                 _openai_models_url(api_url),
                 headers={"Authorization": f"Bearer {api_key.strip()}"},
@@ -216,15 +261,46 @@ def detect_available_models(provider: str, api_key: str, api_url: str):
             )
             response.raise_for_status()
             models = [str(item.get("id", "")).strip() for item in response.json().get("data", [])]
+        else:
+            if not (api_url or "").strip().lower().startswith("https://"):
+                raise ValueError("Hugging Face Space 請使用 HTTPS Ollama URL；localhost 與 11434 無法由雲端直接存取。")
+            if "your-ollama.example.com" in (api_url or "").lower():
+                raise ValueError("目前仍是範例網址。請改填 Cloudflare Tunnel 或反向代理實際產生的 HTTPS URL。")
+            response = requests.get(
+                _ollama_api_url(api_url, "tags"),
+                headers=_auth_headers(api_key),
+                timeout=20,
+            )
+            response.raise_for_status()
+            ollama_models = response.json().get("models", [])
+            models = [str(item.get("name", "")).strip() for item in ollama_models]
+            for item in ollama_models:
+                details = item.get("details", {}) or {}
+                size = int(item.get("size", 0) or 0)
+                model_details.append({
+                    "name": str(item.get("name", "")).strip(),
+                    "size": f"{size / (1024 ** 3):.2f} GB" if size else "未知",
+                    "family": details.get("family") or details.get("format") or "未知",
+                    "quantization": details.get("quantization_level") or "未知",
+                })
 
         models = sorted({model for model in models if model}, key=str.lower)
         if not models:
             raise ValueError("API 回應成功，但沒有可用模型。您仍可手動輸入模型名稱。")
         preferred = next((m for m in models if "flash" in m.lower()), models[0])
-        return (
-            gr.Dropdown(choices=models, value=preferred, allow_custom_value=True),
-            f"✅ API Key 驗證成功，共找到 {len(models)} 個可用模型。",
-        )
+        if provider == "Ollama 遠端服務":
+            rows = ["| 模型 | 大小 | 家族/格式 | 量化 |", "|---|---:|---|---|"]
+            for detail in model_details:
+                rows.append(
+                    f"| `{detail['name']}` | {detail['size']} | {detail['family']} | {detail['quantization']} |"
+                )
+            status = (
+                f"✅ Ollama 連線成功：`{(api_url or '').rstrip('/')}`  "
+                f"\n共找到 **{len(models)}** 個可用模型。\n\n" + "\n".join(rows)
+            )
+        else:
+            status = f"✅ API Key 驗證成功，共找到 {len(models)} 個可用模型。"
+        return gr.Dropdown(choices=models, value=preferred, allow_custom_value=True), status
     except requests.HTTPError as exc:
         detail = ""
         try:
@@ -274,8 +350,10 @@ def run_review(
         provider, api_key, model_name, api_url, "模擬偵測", "", "",
         enable_rag, enable_web, enable_references, tavily_key,
     )
-    if config["llm_mode"] != "mock" and not config["cloud"]["api_key"]:
+    if config["llm_mode"] == "cloud" and not config["cloud"]["api_key"]:
         raise gr.Error("請輸入所選推論服務的 API Key。")
+    if config["llm_mode"] == "ollama" and not config["ollama"]["host"].lower().startswith("https://"):
+        raise gr.Error("雲端 Space 只能連線至 HTTPS Ollama URL，不能使用 localhost:11434。")
 
     config_path = _temporary_config(config)
     try:
@@ -361,18 +439,19 @@ with gr.Blocks(title=APP_TITLE) as demo:
 
     with gr.Accordion("⚙️ 推論與知識設定", open=True):
         with gr.Row():
-            provider = gr.Radio(["Gemini", "OpenAI 相容 API", "模擬模式"], value="Gemini", label="推論服務")
+            provider = gr.Radio(["Gemini", "OpenAI 相容 API", "Ollama 遠端服務", "模擬模式"], value="Gemini", label="推論服務")
             model_name = gr.Dropdown(
                 choices=["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
                 value="gemini-2.5-flash", allow_custom_value=True,
                 label="模型名稱（可從偵測結果選擇或自行輸入）",
             )
-        api_key = gr.Textbox(label="API Key", type="password", placeholder="不會寫入儲存庫或永久磁碟")
+        api_key = gr.Textbox(label="API Key / Ollama Access Token（Ollama 可選填）", type="password", placeholder="不會寫入儲存庫或永久磁碟")
         with gr.Row():
-            detect_models_button = gr.Button("🔍 驗證 API Key 並偵測可用模型")
+            detect_models_button = gr.Button("🔍 測試連線並顯示可用模型")
             model_detection_status = gr.Markdown("輸入 API Key 後可自動取得模型清單。")
-        api_url = gr.Textbox(value="https://api.openai.com/v1/chat/completions", label="OpenAI 相容 API Endpoint", visible=False)
+        api_url = gr.Textbox(value="https://api.openai.com/v1/chat/completions", label="API Endpoint / Ollama HTTPS Base URL", visible=False)
         provider.change(provider_defaults, provider, [model_name, api_url])
+        provider.change(provider_help, provider, model_detection_status)
         detect_models_button.click(
             detect_available_models,
             [provider, api_key, api_url],
@@ -461,6 +540,8 @@ with gr.Blocks(title=APP_TITLE) as demo:
 4. AI 文字偵測可使用 ZeroGPU 模型、GPTZero，或不耗用配額的模擬模式。
 
 API Key 只會寫入單次請求使用的臨時檔案，請求結束後立即刪除。免費 Space 不提供 Ollama 或 GGUF 本機模型服務。
+
+Ollama 模式必須填入可由網際網路存取的 HTTPS URL（例如受 Cloudflare Access 或反向代理保護的端點）。請勿直接公開未驗證的 `11434` 連接埠。
 """)
 
 
